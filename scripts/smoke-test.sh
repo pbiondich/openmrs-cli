@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Live smoke tests for omrs against the OpenMRS public demo server.
+# Usage: ./scripts/smoke-test.sh [path-to-omrs-binary]
+set -u
+
+OMRS="${1:-omrs}"
+SERVER="https://dev3.openmrs.org/openmrs"
+AUTH=(-s "$SERVER" -u admin -p Admin123)
+PASS=0
+FAIL=0
+
+check() {
+  local desc="$1"; shift
+  if "$OMRS" "$@" >/dev/null 2>&1; then
+    echo "PASS: $desc"; PASS=$((PASS + 1))
+  else
+    echo "FAIL: $desc (exit $?)"; FAIL=$((FAIL + 1))
+  fi
+}
+
+check_exit() {
+  local desc="$1" want="$2"; shift 2
+  "$OMRS" "$@" >/dev/null 2>&1
+  local got=$?
+  if [[ "$got" -eq "$want" ]]; then
+    echo "PASS: $desc (exit $got)"; PASS=$((PASS + 1))
+  else
+    echo "FAIL: $desc (want exit $want, got $got)"; FAIL=$((FAIL + 1))
+  fi
+}
+
+check_json() {
+  local desc="$1"; shift
+  if "$OMRS" "$@" --json 2>/dev/null | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+ok = isinstance(d, dict) and ("results" in d or "uuid" in d or "authenticated" in d)
+sys.exit(0 if ok else 1)'; then
+    echo "PASS: $desc"; PASS=$((PASS + 1))
+  else
+    echo "FAIL: $desc"; FAIL=$((FAIL + 1))
+  fi
+}
+
+echo "=== omrs smoke tests against $SERVER ==="
+check      "ping"                       "${AUTH[@]}" ping
+check_json "session"                    "${AUTH[@]}" session
+check_json "whoami"                     "${AUTH[@]}" whoami
+check_exit "whoami unauthenticated"  2  -s "$SERVER" -u admin -p wrongpass whoami
+check_json "patient search"             "${AUTH[@]}" patient search john --limit 3
+check_json "concept search"             "${AUTH[@]}" concept search malaria --limit 3
+check_json "location list"              "${AUTH[@]}" location list --limit 5
+check_json "user list"                  "${AUTH[@]}" user list --limit 3
+check_json "provider list"              "${AUTH[@]}" provider list --limit 3
+check_json "get visittype"              "${AUTH[@]}" get visittype
+check_json "get encountertype"          "${AUTH[@]}" get encountertype
+check_json "get with inline query"      "${AUTH[@]}" get "patient?q=john" --limit 2
+check_json "patient search --full"      "${AUTH[@]}" patient search john --limit 2 --full
+check_json "concept search --all"       "${AUTH[@]}" concept search "blood pressure" --all
+check_exit "auth error is exit 2"    2  -s "$SERVER" -u admin -p wrongpass patient search john
+check_exit "connection error is exit 3" 3 -s https://no-such-host-omrs.invalid/openmrs ping
+check_exit "not-found is exit 4"     4  "${AUTH[@]}" patient get 00000000-dead-beef-0000-000000000000
+
+echo
+echo "Results: $PASS passed, $FAIL failed"
+exit $((FAIL > 0))
