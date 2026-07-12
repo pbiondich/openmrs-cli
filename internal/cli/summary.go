@@ -36,11 +36,15 @@ type section struct {
 }
 
 var patientSummaryCmd = &cobra.Command{
-	Use:   "summary <mrn-or-uuid>",
+	Use:   "summary <identifier-or-uuid>",
 	Short: "Clinical summary for one patient (IPS-aligned sections)",
 	Long: `Assembles a patient summary from parallel REST and FHIR queries:
 active visit, problems, medications, allergies, vitals, recent
 encounters with their observations, and program enrollments.
+
+The patient resolves from any identifier type the server knows (MRN,
+old ID, national ID, ...) on an exact value match, a UUID, or a unique
+name; an ambiguous reference errors with the candidates listed.
 
 Sections follow the International Patient Summary (IPS) core where it
 applies. Medications and vitals prefer the FHIR2 module and fall back to

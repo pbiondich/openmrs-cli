@@ -39,7 +39,7 @@ omrs config use demo        # make the public demo server your default
 # Query away
 omrs patient search "john"
 omrs patient get <uuid>
-omrs patient summary <mrn>       # one-page clinical summary, IPS-aligned sections
+omrs patient summary <id>        # one-page clinical summary, IPS-aligned sections
 omrs concept search "malaria"
 omrs encounter list --patient <uuid>
 omrs encounter list --patient <uuid> --since 30d
@@ -52,9 +52,11 @@ Date filters accept ISO dates (`2026-01-01`), relative ages (`7d`, `4w`, `6m`, `
 
 ## Patient summaries
 
-`omrs patient summary <mrn-or-uuid>` assembles a one-page clinical picture from parallel REST and FHIR queries: active visit, problems, medications, allergies, vitals, recent encounters with their observations, and program enrollments. The sections follow the International Patient Summary (IPS) core where it applies, so the output will hopefully feel familiar and maps cleanly onto `$summary` when OpenMRS grows IPS server-side support.
+`omrs patient summary <identifier-or-uuid>` assembles a one-page clinical picture from parallel REST and FHIR queries: active visit, problems, medications, allergies, vitals, recent encounters with their observations, and program enrollments. The sections follow the International Patient Summary (IPS) core where it applies, so the output will hopefully feel familiar and maps cleanly onto `$summary` when OpenMRS grows IPS server-side support.
 
-A few choices worth knowing about: an ambiguous patient ID (MRN) always returns an error, and provides you with candidates you might have met instead. "No known allergies" is stated explicitly, per IPS, and the JSON output distinguishes "none recorded" from "couldn't fetch" so an agent never confuses the two. Medication summaries prefer FHIR and fall back to REST orders on servers without the fhir2 module. And if one section fails, the rest still render... a 7/8-complete summary is useful, IMO... and we shouldn't let perfect get in the way of pretty good.
+Any identifier type resolves the patient, not just the MRN... an old ID, a national ID, whatever the server knows them by, as long as the value matches exactly. A unique name works too, as a convenience. And an ambiguous identifier always returns an error, with the candidates you might have meant instead.
+
+A few more choices worth knowing about: "No known allergies" is stated explicitly, per IPS, and the JSON output distinguishes "none recorded" from "couldn't fetch" so an agent never confuses the two. Medication summaries prefer FHIR and fall back to REST orders on servers without the fhir2 module. And if one section fails, the rest still render... a 7/8-complete summary is useful, IMO... and we shouldn't let perfect get in the way of pretty good.
 
 ```bash
 omrs patient summary 5574MO-2

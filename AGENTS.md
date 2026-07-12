@@ -25,9 +25,11 @@ The dedicated commands (`patient`, `encounter`, `obs`, `concept`, `visit`,
 `location`, `user`, `provider`) cover common queries.
 
 For a full clinical picture of one patient, prefer
-`omrs patient summary <mrn-or-uuid> --json` over assembling it yourself:
-it fans out REST+FHIR queries in parallel and returns IPS-aligned
-sections. Each section reports `status` (`ok` | `none` | `unavailable`)
+`omrs patient summary <identifier-or-uuid> --json` over assembling it
+yourself: it fans out REST+FHIR queries in parallel and returns
+IPS-aligned sections. Any identifier type resolves the patient on an
+exact value match (so does a UUID or a unique name); an ambiguous
+reference errors with the candidates listed. Each section reports `status` (`ok` | `none` | `unavailable`)
 and `source` — treat `none` as "nothing recorded" and `unavailable` as
 "could not fetch"; never conflate them. UUIDs are preserved on every
 item for follow-up queries.
