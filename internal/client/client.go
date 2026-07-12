@@ -107,6 +107,13 @@ func (c *Client) getURL(u string) (map[string]any, error) {
 		return nil, apiErrorFromResponse(resp.StatusCode, body)
 	}
 
+	// 204 No Content (and empty bodies generally) mean "success, nothing
+	// to return" — e.g. a patient with no recorded allergies. Render as
+	// an empty result set rather than a parse failure.
+	if resp.StatusCode == http.StatusNoContent || len(strings.TrimSpace(string(body))) == 0 {
+		return map[string]any{"results": []any{}}, nil
+	}
+
 	var out map[string]any
 	if err := json.Unmarshal(body, &out); err != nil {
 		return nil, &APIError{
