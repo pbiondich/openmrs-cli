@@ -126,7 +126,7 @@ go build ./... && go vet ./...      # build + lint
 ./scripts/smoke-test.sh ./omrs      # live smoke tests against dev3.openmrs.org
 ```
 
-The dependency list is deliberately small (cobra, x/term, go-keyring) and I'd like to keep it that way: a tool that touches clinical systems should be auditable in an afternoon.
+The dependency list is deliberately small (cobra, x/term, go-keyring) and I'd like to keep it that way: a tool that touches patient data should be auditable in an afternoon.
 
 ## Where this goes next
 
