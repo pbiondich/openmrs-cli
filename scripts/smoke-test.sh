@@ -57,6 +57,8 @@ check_json "get encountertype"          "${AUTH[@]}" get encountertype
 check_json "get with inline query"      "${AUTH[@]}" get "patient?q=john" --limit 2
 check_json "patient search --full"      "${AUTH[@]}" patient search john --limit 2 --full
 check_json "concept search --all"       "${AUTH[@]}" concept search "blood pressure" --all
+check_json "visit list --since"         "${AUTH[@]}" visit list --since 7d --limit 3
+check_exit "bad --since rejected"    1  "${AUTH[@]}" encounter list --since "not-a-date"
 check_exit "auth error is exit 2"    2  -s "$SERVER" -u admin -p wrongpass patient search john
 check_exit "connection error is exit 3" 3 -s https://no-such-host-omrs.invalid/openmrs ping
 check_exit "not-found is exit 4"     4  "${AUTH[@]}" patient get 00000000-dead-beef-0000-000000000000

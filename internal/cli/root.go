@@ -119,25 +119,27 @@ func outputMode() output.Mode {
 	return output.Detect(flags.jsonOut, flags.tableOut)
 }
 
-// fetchList performs a list/search query honoring limit/start/--all,
-// and prints the result.
-func fetchList(path string, params url.Values, resource string) error {
+// fetchListData performs a list/search query honoring limit/start/--all.
+func fetchListData(path string, params url.Values) (map[string]any, error) {
 	c, err := newClient()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	params.Set("v", representation())
 
-	var data map[string]any
 	if flags.all {
-		data, err = c.GetAll(path, params, PaginationCap)
-	} else {
-		params.Set("limit", fmt.Sprint(flags.limit))
-		if flags.start > 0 {
-			params.Set("startIndex", fmt.Sprint(flags.start))
-		}
-		data, err = c.Get(path, params)
+		return c.GetAll(path, params, PaginationCap)
 	}
+	params.Set("limit", fmt.Sprint(flags.limit))
+	if flags.start > 0 {
+		params.Set("startIndex", fmt.Sprint(flags.start))
+	}
+	return c.Get(path, params)
+}
+
+// fetchList fetches and prints a list/search query.
+func fetchList(path string, params url.Values, resource string) error {
+	data, err := fetchListData(path, params)
 	if err != nil {
 		return err
 	}

@@ -6,7 +6,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var encounterPatient, encounterType string
+var encounterPatient, encounterType, encounterSince, encounterUntil string
 
 var encounterCmd = &cobra.Command{
 	Use:   "encounter",
@@ -17,7 +17,8 @@ var encounterListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List encounters (OpenMRS returns an empty list without a filter)",
 	Example: `  omrs encounter list --patient <uuid>
-  omrs encounter list --patient <uuid> --type <encounter-type-uuid> --all`,
+  omrs encounter list --patient <uuid> --since 30d
+  omrs encounter list --patient <uuid> --since 2026-01-01 --until yesterday --all`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		params := url.Values{}
@@ -27,6 +28,20 @@ var encounterListCmd = &cobra.Command{
 		if encounterType != "" {
 			params.Set("encounterType", encounterType)
 		}
+		if encounterSince != "" {
+			_, s, err := parseWhen(encounterSince, false)
+			if err != nil {
+				return err
+			}
+			params.Set("fromdate", s)
+		}
+		if encounterUntil != "" {
+			_, s, err := parseWhen(encounterUntil, true)
+			if err != nil {
+				return err
+			}
+			params.Set("todate", s)
+		}
 		warnIfNoFilter(params, "--patient <uuid>")
 		return fetchList("encounter", params, "encounter")
 	},
@@ -35,6 +50,8 @@ var encounterListCmd = &cobra.Command{
 func init() {
 	encounterListCmd.Flags().StringVar(&encounterPatient, "patient", "", "filter by patient UUID")
 	encounterListCmd.Flags().StringVar(&encounterType, "type", "", "filter by encounter type UUID")
+	encounterListCmd.Flags().StringVar(&encounterSince, "since", "", "only encounters on/after this date (YYYY-MM-DD, 7d, today, ...)")
+	encounterListCmd.Flags().StringVar(&encounterUntil, "until", "", "only encounters on/before this date")
 	encounterCmd.AddCommand(encounterListCmd, getCmd("encounter", "encounter"))
 	rootCmd.AddCommand(encounterCmd)
 }

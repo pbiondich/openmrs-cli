@@ -41,9 +41,13 @@ omrs patient search "john"
 omrs patient get <uuid>
 omrs concept search "malaria"
 omrs encounter list --patient <uuid>
+omrs encounter list --patient <uuid> --since 30d
 omrs obs list --patient <uuid> --concept <uuid>
+omrs obs list --patient <uuid> --since 2026-01-01 --until yesterday --all
 omrs location list
 ```
+
+Date filters accept ISO dates (`2026-01-01`), relative ages (`7d`, `4w`, `6m`, `1y`), and `today`/`yesterday`. Encounters and visits filter on the server; obs filters client-side after fetch (the REST API ignores date parameters there), so pair it with `--all` for complete results... the CLI will remind you if you forget.
 
 ## Full REST API coverage
 
@@ -112,6 +116,6 @@ The dependency list is deliberately small (cobra, x/term, go-keyring) and I'd li
 
 ## Where this goes next
 
-Write operations behind explicit flags, date filtering (`--since`, `--until`), and a proper GoReleaser pipeline with cross-platform binaries are the likely next steps, roughly in that order.
+Write operations behind explicit flags and a proper GoReleaser pipeline with cross-platform binaries are the likely next steps, roughly in that order.
 
 If you kick the tires and something resonates (or breaks), I'd love to hear about it... open an issue, or find me in the OpenMRS community!
