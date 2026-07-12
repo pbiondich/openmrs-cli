@@ -116,6 +116,6 @@ The dependency list is deliberately small (cobra, x/term, go-keyring) and I'd li
 
 ## Where this goes next
 
-Write operations behind explicit flags and a proper GoReleaser pipeline with cross-platform binaries are the likely next steps, roughly in that order.
+Write operations behind explicit flags and more convenience query commands as requested and that I can dream up. :)
 
 If you kick the tires and something resonates (or breaks), I'd love to hear about it... open an issue, or find me in the OpenMRS community!
