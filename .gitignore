@@ -2,3 +2,4 @@ omrs
 dist/
 *.test
 .DS_Store
+dist/

@@ -1,0 +1,53 @@
+version: 2
+
+project_name: omrs
+
+builds:
+  - id: omrs
+    main: ./cmd/omrs
+    binary: omrs
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X github.com/pbiondich/openmrs-cli/internal/cli.Version={{.Version}}
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - README.md
+      - LICENSE*
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^chore:"
+
+release:
+  footer: |
+    ## Install
+
+    macOS/Linux: download the archive for your platform, extract, and put `omrs` on your PATH.
+    Or with Go installed: `go install github.com/pbiondich/openmrs-cli/cmd/omrs@{{.Tag}}`

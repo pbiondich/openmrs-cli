@@ -15,7 +15,9 @@ import (
 	"github.com/pbiondich/openmrs-cli/internal/output"
 )
 
-const Version = "0.1.0"
+// Version is the release version, injected at build time by GoReleaser
+// via -ldflags; "dev" for local builds.
+var Version = "dev"
 
 // PaginationCap bounds --all to avoid unbounded fetches.
 const PaginationCap = 5000
