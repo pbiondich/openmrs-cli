@@ -22,8 +22,17 @@ omrs whoami          # verify; exits 2 if not authenticated
 ```
 
 The dedicated commands (`patient`, `encounter`, `obs`, `concept`, `visit`,
-`location`, `user`, `provider`) cover common queries. Every other REST
-resource is reachable through the escape hatch:
+`location`, `user`, `provider`) cover common queries.
+
+For a full clinical picture of one patient, prefer
+`omrs patient summary <mrn-or-uuid> --json` over assembling it yourself:
+it fans out REST+FHIR queries in parallel and returns IPS-aligned
+sections. Each section reports `status` (`ok` | `none` | `unavailable`)
+and `source` — treat `none` as "nothing recorded" and `unavailable` as
+"could not fetch"; never conflate them. UUIDs are preserved on every
+item for follow-up queries.
+
+Every other REST resource is reachable through the escape hatch:
 
 ```bash
 omrs get <path> --param k=v --param k2=v2

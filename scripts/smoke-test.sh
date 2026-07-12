@@ -58,6 +58,26 @@ check_json "get with inline query"      "${AUTH[@]}" get "patient?q=john" --limi
 check_json "patient search --full"      "${AUTH[@]}" patient search john --limit 2 --full
 check_json "concept search --all"       "${AUTH[@]}" concept search "blood pressure" --all
 check_json "visit list --since"         "${AUTH[@]}" visit list --since 7d --limit 3
+
+# patient summary: resolve a live uuid first, then check section shape
+SUMMARY_UUID=$("$OMRS" "${AUTH[@]}" patient search "mary" --limit 1 --json 2>/dev/null \
+  | python3 -c "import json,sys; print(json.load(sys.stdin)['results'][0]['uuid'])" 2>/dev/null || true)
+if [[ -n "$SUMMARY_UUID" ]]; then
+  if "$OMRS" "${AUTH[@]}" patient summary "$SUMMARY_UUID" --sections problems,meds,allergies --json 2>/dev/null \
+    | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+s = d.get("sections", {})
+ok = all(k in s and s[k]["status"] in ("ok", "none", "unavailable") for k in ("problems", "meds", "allergies"))
+sys.exit(0 if ok else 1)'; then
+    echo "PASS: patient summary"; PASS=$((PASS + 1))
+  else
+    echo "FAIL: patient summary"; FAIL=$((FAIL + 1))
+  fi
+else
+  echo "FAIL: patient summary (could not resolve test patient)"; FAIL=$((FAIL + 1))
+fi
+check_exit "summary not-found is exit 4" 4 "${AUTH[@]}" patient summary NO-SUCH-MRN-999
 check_exit "bad --since rejected"    1  "${AUTH[@]}" encounter list --since "not-a-date"
 check_exit "auth error is exit 2"    2  -s "$SERVER" -u admin -p wrongpass patient search john
 check_exit "connection error is exit 3" 3 -s https://no-such-host-omrs.invalid/openmrs ping

@@ -77,6 +77,24 @@ func (c *Client) Get(path string, params url.Values) (map[string]any, error) {
 	return c.getURL(u)
 }
 
+// GetFHIR performs a GET against the FHIR2 module's R4 endpoint. An
+// OperationOutcome response is surfaced as an error so callers can fall
+// back to the REST API.
+func (c *Client) GetFHIR(path string, params url.Values) (map[string]any, error) {
+	u := c.baseURL + "/ws/fhir2/R4/" + strings.TrimLeft(path, "/")
+	if len(params) > 0 {
+		u += "?" + params.Encode()
+	}
+	out, err := c.getURL(u)
+	if err != nil {
+		return nil, err
+	}
+	if out["resourceType"] == "OperationOutcome" {
+		return nil, &APIError{Message: "FHIR server returned an OperationOutcome error", Code: CodeUnknown}
+	}
+	return out, nil
+}
+
 func (c *Client) getURL(u string) (map[string]any, error) {
 	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {

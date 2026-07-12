@@ -39,6 +39,7 @@ omrs config use demo        # make the public demo server your default
 # Query away
 omrs patient search "john"
 omrs patient get <uuid>
+omrs patient summary <mrn>       # one-page clinical summary, IPS-aligned sections
 omrs concept search "malaria"
 omrs encounter list --patient <uuid>
 omrs encounter list --patient <uuid> --since 30d
@@ -48,6 +49,17 @@ omrs location list
 ```
 
 Date filters accept ISO dates (`2026-01-01`), relative ages (`7d`, `4w`, `6m`, `1y`), and `today`/`yesterday`. Encounters and visits filter on the server; obs filters client-side after fetch (the REST API ignores date parameters there), so pair it with `--all` for complete results... the CLI will remind you if you forget.
+
+## Patient summaries
+
+`omrs patient summary <mrn-or-uuid>` assembles a one-page clinical picture from parallel REST and FHIR queries: active visit, problems, medications, allergies, vitals, recent encounters with their observations, and program enrollments. The sections follow the International Patient Summary (IPS) core where it applies, so the shape will feel familiar and maps cleanly onto `$summary` when OpenMRS grows server-side support.
+
+A few choices worth knowing about. An ambiguous MRN is an error, never a guess. "No known allergies" is stated explicitly, per IPS, and the JSON output distinguishes "none recorded" from "couldn't fetch" so an agent never confuses the two. Medications prefer FHIR and fall back to REST orders on servers without the fhir2 module. And if one section fails, the rest still render... a 7/8-complete summary is useful, an all-or-nothing one isn't.
+
+```bash
+omrs patient summary 5574MO-2
+omrs patient summary 5574MO-2 --sections problems,meds,allergies --json
+```
 
 ## Full REST API coverage
 
