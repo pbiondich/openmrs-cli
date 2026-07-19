@@ -4,7 +4,7 @@
 
 The idea behind it is simple: is it possible to create a useful CLI for an OpenMRS implementation both for humans and AI agents? Structured errors on stderr, stable exit codes, and everything discoverable through `--help` are what make that possible. My sense is that tooling like this is becoming really commonplace for all applications, and I wanted to see what it feels like in practice on OpenMRS.
 
-> This is an experimental, read-only personal project (v0.1)... not an official OpenMRS community tool, at least not yet. :)
+> This is an experimental, read-only personal project... not an official OpenMRS community tool, at least not yet. :)
 
 ## Install
 
