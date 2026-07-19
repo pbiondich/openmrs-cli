@@ -22,7 +22,7 @@ go build -o omrs ./cmd/omrs && mv omrs /usr/local/bin/
 
 ## Quick start
 
-If you just want to poke at the public sandbox, this is the whole on-ramp:
+Public sandbox:
 
 ```bash
 omrs login --demo
@@ -30,9 +30,7 @@ omrs whoami
 omrs patient search "john"
 ```
 
-`--demo` uses the well-known public credentials on [dev3.openmrs.org](https://dev3.openmrs.org/openmrs), stores them under a `demo` profile (and makes it your default), and reminds you the server resets... never put anything you care about there.
-
-For a real server (or localhost), login the ordinary way... password is prompted, never echoed, and lands in the OS credential store when one is available:
+Your own server (or localhost):
 
 ```bash
 omrs login -s https://your-openmrs.example.org/openmrs -u youruser
@@ -44,6 +42,8 @@ omrs encounter list --patient <uuid> --since 30d
 omrs obs list --patient <uuid> --since 2026-01-01 --until yesterday --all
 omrs location list
 ```
+
+Details on where passwords go and how profiles work are under [Authentication](#authentication) and [Configuration](#configuration) below.
 
 Date filters accept ISO dates (`2026-01-01`), relative ages (`7d`, `4w`, `6m`, `1y`), and `today`/`yesterday`. Encounters and visits filter on the server; obs filters client-side after fetch (the REST API ignores date parameters there), so pair it with `--all` for complete results... the CLI will remind you if you forget.
 
@@ -80,23 +80,19 @@ The CLI's output is yours to control: `--full`, `--ref`, or `--fields uuid,displ
 
 ## Authentication
 
-Two paths, on purpose:
+`omrs login --demo` is the labeled public-sandbox exception: well-known credentials on [dev3.openmrs.org](https://dev3.openmrs.org/openmrs), saved under the `demo` profile (and made your default). That server resets periodically... never put anything you care about there.
 
-```bash
-omrs login --demo                                          # public sandbox, no prompts
-omrs login -s https://your-openmrs.example.org/openmrs -u youruser   # real server
-```
+For everything else, `omrs login -s <url> -u <user>` prompts for a password (hidden), checks it against the server *before* saving, and stores it in the OS credential store (Keychain / Credential Manager / Secret Service)... with a config-file fallback only when there's no keyring. `omrs logout` clears the stored secret. `omrs whoami` is the hard check (exit 2 if you're not authenticated).
 
-In both cases, credentials are checked against the server *before* anything is saved. The password goes in the OS credential store (Keychain / Credential Manager / Secret Service)... with a config-file fallback only when there's no keyring. `omrs logout` clears it. `omrs whoami` is the hard check: exit 2 if you're not authenticated.
-
-Scripts and agents can skip the interactive prompt:
+Scripts and agents:
 
 ```bash
 echo "$OMRS_PW" | omrs login -s http://localhost/openmrs -u admin --password-stdin
-# or one-shot without saving: OMRS_SERVER / OMRS_USER / OMRS_PASSWORD
+# one-shot without saving a profile:
+#   OMRS_SERVER=... OMRS_USER=... OMRS_PASSWORD=... omrs whoami
 ```
 
-One deliberate choice: there is no `-p` flag, and `config init` does not write passwords. I don't want the easy path to teach people to leave secrets on the process line or in a starter config... the public demo is the exception, and it's labeled as such via `--demo`.
+There is no `-p` flag on purpose. I don't want the easy path to teach leaving secrets on the process line or in a starter config file.
 
 ## For AI agents
 
@@ -110,19 +106,19 @@ The real test is telling your favorite coding agent "use `omrs` to explore my Op
 
 ## Configuration
 
-Profiles live in `~/.config/omrs/config.json` (mode 0600):
+Profiles live in `~/.config/omrs/config.json` (mode 0600). `omrs config init` seeds empty `local` and `demo` shells (URL/user only). After login, a profile looks more like:
 
 ```json
 {
-  "defaultProfile": "local",
+  "defaultProfile": "demo",
   "profiles": {
     "local": {"url": "http://localhost/openmrs", "user": "admin", "passwordStore": "keychain"},
-    "demo":  {"url": "https://dev3.openmrs.org/openmrs", "user": "admin"}
+    "demo":  {"url": "https://dev3.openmrs.org/openmrs", "user": "admin", "passwordStore": "keychain"}
   }
 }
 ```
 
-`omrs config init` only writes URL/user shells for `local` and `demo`... no passwords. After `omrs login`, the profile carries `"passwordStore": "keychain"` instead of a password field. Precedence is flags (`-s`/`-u`/`--profile`), then env (`OMRS_SERVER`, `OMRS_USER`, `OMRS_PASSWORD`, `OMRS_PROFILE`), then the default profile, then the built-in default URL (`http://localhost/openmrs`) with no default credentials.
+`passwordStore: "keychain"` means the secret is in the OS store, not this file. Switch defaults with `omrs config use <name>`, or pass `--profile` / `OMRS_PROFILE` for one command. Connection settings resolve as: flags → env (`OMRS_SERVER`, `OMRS_USER`, `OMRS_PASSWORD`, `OMRS_PROFILE`) → default profile → built-in URL `http://localhost/openmrs` (still no default password).
 
 ## Development
 
