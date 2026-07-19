@@ -64,24 +64,27 @@ func TestRESTPageCapped(t *testing.T) {
 
 func TestMedsSectionTruncatedOnFullFHIRPage(t *testing.T) {
 	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/ws/fhir2/R4/MedicationRequest" {
-			http.NotFound(w, r)
-			return
-		}
-		var entry []any
-		for i := 0; i < medsFHIRCount; i++ {
-			entry = append(entry, map[string]any{
-				"resource": map[string]any{
-					"status":                    "completed", // filtered out → empty items
-					"authoredOn":                "2026-01-01",
-					"medicationCodeableConcept": map[string]any{"text": "drug"},
-				},
+		switch r.URL.Path {
+		case "/ws/fhir2/R4/MedicationRequest":
+			var entry []any
+			for i := 0; i < medsFHIRCount; i++ {
+				entry = append(entry, map[string]any{
+					"resource": map[string]any{
+						"status":                    "completed", // filtered out → empty items
+						"authoredOn":                "2026-01-01",
+						"medicationCodeableConcept": map[string]any{"text": "drug"},
+					},
+				})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"resourceType": "Bundle",
+				"entry":        entry,
 			})
+		case "/ws/rest/v1/order":
+			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}})
+		default:
+			http.NotFound(w, r)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"resourceType": "Bundle",
-			"entry":        entry,
-		})
 	})
 	s := medsSection(c, "patient-uuid")
 	if s.Status != statusNone {
@@ -92,6 +95,41 @@ func TestMedsSectionTruncatedOnFullFHIRPage(t *testing.T) {
 	}
 	if len(s.Items) != 0 {
 		t.Fatalf("items=%d", len(s.Items))
+	}
+}
+
+func TestMedsSectionEmptyFHIRFallsBackToREST(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ws/fhir2/R4/MedicationRequest":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"resourceType": "Bundle",
+				"entry":        []any{},
+			})
+		case "/ws/rest/v1/order":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"results": []any{
+					map[string]any{
+						"uuid":          "ord-1",
+						"type":          "drugorder",
+						"action":        "NEW",
+						"dateStopped":   nil,
+						"dateActivated": "2026-01-01",
+						"display":       "Aspirin",
+						"concept":       map[string]any{"uuid": "c-asp"},
+					},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	s := medsSection(c, "patient-uuid")
+	if s.Source != "rest-orders" {
+		t.Fatalf("source=%s", s.Source)
+	}
+	if s.Status != statusOK || len(s.Items) != 1 {
+		t.Fatalf("%+v", s)
 	}
 }
 
@@ -116,6 +154,48 @@ func TestVitalsSectionNotTruncatedOnShortPage(t *testing.T) {
 	}
 	if len(s.Items) != 1 {
 		t.Fatalf("items=%d", len(s.Items))
+	}
+}
+
+func TestVitalsEmptyCategoryFallsBackUncategorized(t *testing.T) {
+	var calls int
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ws/fhir2/R4/Observation" {
+			http.NotFound(w, r)
+			return
+		}
+		calls++
+		if r.URL.Query().Get("category") == "vital-signs" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"resourceType": "Bundle", "entry": []any{}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"resourceType": "Bundle",
+			"entry": []any{
+				map[string]any{
+					"resource": map[string]any{
+						"id": "o1",
+						"code": map[string]any{
+							"coding": []any{
+								map[string]any{"system": "https://ciel", "code": "5089"},
+							},
+							"text": "Weight",
+						},
+						"valueQuantity": map[string]any{"value": 70.0, "unit": "kg"},
+					},
+				},
+			},
+		})
+	})
+	s := vitalsSection(c, "patient-uuid")
+	if calls < 2 {
+		t.Fatalf("expected category then uncategorized, calls=%d", calls)
+	}
+	if s.Source != "fhir-uncategorized" || !s.Partial {
+		t.Fatalf("%+v", s)
+	}
+	if s.Status != statusOK || len(s.Items) != 1 {
+		t.Fatalf("%+v", s)
 	}
 }
 

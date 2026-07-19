@@ -337,43 +337,77 @@ func allergiesSection(c *client.Client, uuid string) *section {
 }
 
 // medsSection prefers FHIR MedicationRequest (richer, cleaner) and falls
-// back to REST orders. The FHIR status search param is broken on some
-// fhir2 versions, so active-filtering happens client-side.
+// back to REST orders on FHIR error *or* when FHIR returns no active meds.
+// An empty FHIR success must not claim pure "none" without checking REST —
+// half-configured fhir2 often yields an empty bundle while orders exist.
 // Identity for "same drug" is concept/coding/reference — not display text.
 func medsSection(c *client.Client, uuid string) *section {
 	bundle, err := c.GetFHIR("MedicationRequest", url.Values{
 		"patient": {uuid}, "_count": {fmt.Sprint(medsFHIRCount)},
 	})
 	if err == nil {
-		entries := asSlice(bundle["entry"])
-		// One drug can carry many still-active refill orders; the med
-		// list wants unique concepts, most recent order winning.
-		latest := map[string]map[string]any{}
-		for _, e := range entries {
-			entry, _ := e.(map[string]any)
-			res, _ := entry["resource"].(map[string]any)
-			if res["status"] != "active" {
-				continue
-			}
-			key := fhirMedIdentityKey(res)
-			prev, seen := latest[key]
-			if !seen || output.Extract(res, "authoredOn") > output.Extract(prev, "authoredOn") {
-				latest[key] = res
-			}
+		items, capped := activeMedsFromFHIRBundle(bundle)
+		if len(items) > 0 {
+			return sectionFromItems("fhir", items, capped)
 		}
-		var items []any
-		for _, res := range latest {
-			items = append(items, res)
+		// Empty active list: prefer REST over a confident FHIR none.
+		// If the FHIR page was capped, keep that incompleteness signal
+		// when REST is also empty.
+		if capped {
+			output.Warn("FHIR medications page was full but no active meds matched; trying REST orders")
+		} else {
+			output.Warn("FHIR returned no active medications; trying REST orders")
 		}
-		sort.Slice(items, func(i, j int) bool {
-			a, _ := items[i].(map[string]any)
-			b, _ := items[j].(map[string]any)
-			return medsDisplay(a) < medsDisplay(b)
-		})
-		return sectionFromItems("fhir", items, fhirBundleCapped(bundle, entries, medsFHIRCount))
+		rest := medsFromREST(c, uuid)
+		if rest.Status == statusUnavailable || rest.Status == statusWithheld {
+			// REST failed: surface FHIR empty with any cap flags rather than
+			// losing the successful FHIR read entirely.
+			if capped {
+				return sectionFromItems("fhir", items, true)
+			}
+			return rest
+		}
+		if len(rest.Items) > 0 {
+			return rest
+		}
+		// Both empty.
+		if capped || rest.Truncated {
+			return sectionFromItems("rest-orders", []any{}, true)
+		}
+		return sectionFromItems("fhir", []any{}, false)
 	}
 
 	output.Warn("FHIR unavailable for medications; falling back to REST orders")
+	return medsFromREST(c, uuid)
+}
+
+func activeMedsFromFHIRBundle(bundle map[string]any) (items []any, capped bool) {
+	entries := asSlice(bundle["entry"])
+	latest := map[string]map[string]any{}
+	for _, e := range entries {
+		entry, _ := e.(map[string]any)
+		res, _ := entry["resource"].(map[string]any)
+		if res["status"] != "active" {
+			continue
+		}
+		key := fhirMedIdentityKey(res)
+		prev, seen := latest[key]
+		if !seen || output.Extract(res, "authoredOn") > output.Extract(prev, "authoredOn") {
+			latest[key] = res
+		}
+	}
+	for _, res := range latest {
+		items = append(items, res)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		a, _ := items[i].(map[string]any)
+		b, _ := items[j].(map[string]any)
+		return medsDisplay(a) < medsDisplay(b)
+	})
+	return items, fhirBundleCapped(bundle, entries, medsFHIRCount)
+}
+
+func medsFromREST(c *client.Client, uuid string) *section {
 	data, err := c.Get("order", url.Values{
 		"patient": {uuid}, "v": {"default"}, "limit": {fmt.Sprint(medsRESTLimit)},
 	})
@@ -381,7 +415,6 @@ func medsSection(c *client.Client, uuid string) *section {
 		return &section{Status: statusForError(err), Source: "rest-orders", Items: []any{}, Error: err.Error()}
 	}
 	raw := asSlice(data["results"])
-	// Dedupe open drug orders by concept/drug uuid when present.
 	latest := map[string]map[string]any{}
 	for _, r := range raw {
 		rec, _ := r.(map[string]any)
@@ -407,8 +440,15 @@ func medsSection(c *client.Client, uuid string) *section {
 }
 
 // vitalsSection returns the latest observation per vital-sign concept via
-// FHIR. Servers whose concepts lack vital-signs category mappings
-// legitimately return none. Identity is coding system+code, not code.text.
+// FHIR. Identity is coding system+code, not code.text.
+//
+// Empty FHIR success is ambiguous (none recorded vs missing vital-signs
+// category mappings). When the bundle is empty we try a second FHIR query
+// without the category filter and keep only resources that still look like
+// vitals (category coding or LOINC/common openmrs vital pattern is too
+// site-specific) — instead we take newest-per-concept from uncategorized
+// Observations and mark the section partial so agents do not treat it as a
+// clean vital-signs panel. Prefer the categorized result whenever it has data.
 func vitalsSection(c *client.Client, uuid string) *section {
 	bundle, err := c.GetFHIR("Observation", url.Values{
 		"patient": {uuid}, "category": {"vital-signs"}, "_sort": {"-date"},
@@ -417,10 +457,39 @@ func vitalsSection(c *client.Client, uuid string) *section {
 	if err != nil {
 		return &section{Status: statusForError(err), Source: "fhir", Items: []any{}, Error: err.Error()}
 	}
+	items, capped := latestObsFromFHIRBundle(bundle, vitalsFHIRCount)
+	if len(items) > 0 {
+		return sectionFromItems("fhir", items, capped)
+	}
+	if capped {
+		// Full page of non-dedupable junk is still incomplete.
+		return sectionFromItems("fhir", items, true)
+	}
+
+	// Empty vital-signs category: try uncategorized observations so a
+	// mis-mapped dictionary does not look like "never measured".
+	output.Warn("FHIR vital-signs category returned no observations; trying uncategorized FHIR Observations")
+	fb, ferr := c.GetFHIR("Observation", url.Values{
+		"patient": {uuid}, "_sort": {"-date"},
+		"_count": {fmt.Sprint(vitalsFHIRCount)},
+	})
+	if ferr != nil {
+		return sectionFromItems("fhir", []any{}, false)
+	}
+	fbItems, fbCapped := latestObsFromFHIRBundle(fb, vitalsFHIRCount)
+	if len(fbItems) == 0 {
+		return sectionFromItems("fhir", []any{}, fbCapped)
+	}
+	// Data found only without the vital-signs filter — useful but not a
+	// clean vitals panel; always partial so status none/ok is not over-read.
+	s := sectionFromItems("fhir-uncategorized", fbItems, fbCapped)
+	s.Partial = true
+	return s
+}
+
+func latestObsFromFHIRBundle(bundle map[string]any, count int) (items []any, capped bool) {
 	entries := asSlice(bundle["entry"])
-	// Bundle is sorted newest-first; first key wins.
 	seen := map[string]bool{}
-	var items []any
 	for _, e := range entries {
 		entry, _ := e.(map[string]any)
 		res, _ := entry["resource"].(map[string]any)
@@ -431,7 +500,7 @@ func vitalsSection(c *client.Client, uuid string) *section {
 		seen[key] = true
 		items = append(items, res)
 	}
-	return sectionFromItems("fhir", items, fhirBundleCapped(bundle, entries, vitalsFHIRCount))
+	return items, fhirBundleCapped(bundle, entries, count)
 }
 
 // fhirMedIdentityKey prefers Medication/Concept reference or coded concept
@@ -845,7 +914,11 @@ func renderSummary(patient map[string]any, sections map[string]*section) {
 	printSection("ALLERGIES", "allergies", func(r map[string]any) string {
 		return output.Extract(r, "display")
 	})
-	printSection("VITALS (latest)", "vitals", func(r map[string]any) string {
+	vitalsTitle := "VITALS (latest)"
+	if s := sections["vitals"]; s != nil && s.Source == "fhir-uncategorized" {
+		vitalsTitle = "VITALS (latest, uncategorized FHIR fallback)"
+	}
+	printSection(vitalsTitle, "vitals", func(r map[string]any) string {
 		return fmt.Sprintf("%s: %s %s (%s)",
 			output.Extract(r, "code.text"),
 			output.Extract(r, "valueQuantity.value"),
