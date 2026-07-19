@@ -340,6 +340,7 @@ func allergiesSection(c *client.Client, uuid string) *section {
 // medsSection prefers FHIR MedicationRequest (richer, cleaner) and falls
 // back to REST orders. The FHIR status search param is broken on some
 // fhir2 versions, so active-filtering happens client-side.
+// Identity for "same drug" is concept/coding/reference — not display text.
 func medsSection(c *client.Client, uuid string) *section {
 	bundle, err := c.GetFHIR("MedicationRequest", url.Values{
 		"patient": {uuid}, "_count": {fmt.Sprint(medsFHIRCount)},
@@ -347,7 +348,7 @@ func medsSection(c *client.Client, uuid string) *section {
 	if err == nil {
 		entries := asSlice(bundle["entry"])
 		// One drug can carry many still-active refill orders; the med
-		// list wants unique drugs, most recent order winning.
+		// list wants unique concepts, most recent order winning.
 		latest := map[string]map[string]any{}
 		for _, e := range entries {
 			entry, _ := e.(map[string]any)
@@ -355,10 +356,10 @@ func medsSection(c *client.Client, uuid string) *section {
 			if res["status"] != "active" {
 				continue
 			}
-			med := output.Extract(res, "medicationReference.display|medicationCodeableConcept.text")
-			prev, seen := latest[med]
+			key := fhirMedIdentityKey(res)
+			prev, seen := latest[key]
 			if !seen || output.Extract(res, "authoredOn") > output.Extract(prev, "authoredOn") {
-				latest[med] = res
+				latest[key] = res
 			}
 		}
 		var items []any
@@ -368,8 +369,7 @@ func medsSection(c *client.Client, uuid string) *section {
 		sort.Slice(items, func(i, j int) bool {
 			a, _ := items[i].(map[string]any)
 			b, _ := items[j].(map[string]any)
-			return output.Extract(a, "medicationReference.display|medicationCodeableConcept.text") <
-				output.Extract(b, "medicationReference.display|medicationCodeableConcept.text")
+			return medsDisplay(a) < medsDisplay(b)
 		})
 		return sectionFromItems("fhir", items, fhirBundleCapped(bundle, entries, medsFHIRCount))
 	}
@@ -382,19 +382,34 @@ func medsSection(c *client.Client, uuid string) *section {
 		return &section{Status: statusForError(err), Source: "rest-orders", Items: []any{}, Error: err.Error()}
 	}
 	raw := asSlice(data["results"])
-	var items []any
+	// Dedupe open drug orders by concept/drug uuid when present.
+	latest := map[string]map[string]any{}
 	for _, r := range raw {
 		rec, _ := r.(map[string]any)
-		if rec["type"] == "drugorder" && rec["action"] != "DISCONTINUE" && rec["dateStopped"] == nil {
-			items = append(items, rec)
+		if rec["type"] != "drugorder" || rec["action"] == "DISCONTINUE" || rec["dateStopped"] != nil {
+			continue
+		}
+		key := restOrderIdentityKey(rec)
+		prev, seen := latest[key]
+		if !seen || output.Extract(rec, "dateActivated") > output.Extract(prev, "dateActivated") {
+			latest[key] = rec
 		}
 	}
+	var items []any
+	for _, rec := range latest {
+		items = append(items, rec)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		a, _ := items[i].(map[string]any)
+		b, _ := items[j].(map[string]any)
+		return output.Extract(a, "display") < output.Extract(b, "display")
+	})
 	return sectionFromItems("rest-orders", items, restPageCapped(data, raw, medsRESTLimit))
 }
 
-// vitalsSection returns the latest observation per vital-sign code via
+// vitalsSection returns the latest observation per vital-sign concept via
 // FHIR. Servers whose concepts lack vital-signs category mappings
-// legitimately return none.
+// legitimately return none. Identity is coding system+code, not code.text.
 func vitalsSection(c *client.Client, uuid string) *section {
 	bundle, err := c.GetFHIR("Observation", url.Values{
 		"patient": {uuid}, "category": {"vital-signs"}, "_sort": {"-date"},
@@ -404,19 +419,94 @@ func vitalsSection(c *client.Client, uuid string) *section {
 		return &section{Status: statusForError(err), Source: "fhir", Items: []any{}, Error: err.Error()}
 	}
 	entries := asSlice(bundle["entry"])
+	// Bundle is sorted newest-first; first key wins.
 	seen := map[string]bool{}
 	var items []any
 	for _, e := range entries {
 		entry, _ := e.(map[string]any)
 		res, _ := entry["resource"].(map[string]any)
-		code := output.Extract(res, "code.text")
-		if code == "" || seen[code] {
+		key := fhirObsIdentityKey(res)
+		if seen[key] {
 			continue
 		}
-		seen[code] = true
+		seen[key] = true
 		items = append(items, res)
 	}
 	return sectionFromItems("fhir", items, fhirBundleCapped(bundle, entries, vitalsFHIRCount))
+}
+
+// fhirMedIdentityKey prefers Medication/Concept reference or coded concept
+// over display labels so the dictionary — not the string — defines sameness.
+func fhirMedIdentityKey(res map[string]any) string {
+	if ref := strings.TrimSpace(output.Extract(res, "medicationReference.reference")); ref != "" {
+		return "ref|" + ref
+	}
+	if cc, ok := res["medicationCodeableConcept"].(map[string]any); ok {
+		if k := codeableConceptKey(cc); k != "" {
+			return k
+		}
+		if t := strings.TrimSpace(output.Extract(cc, "text")); t != "" {
+			return "text|" + t
+		}
+	}
+	if d := strings.TrimSpace(output.Extract(res, "medicationReference.display")); d != "" {
+		return "text|" + d
+	}
+	if id := strings.TrimSpace(output.Extract(res, "id")); id != "" {
+		return "id|" + id
+	}
+	return "unknown|med"
+}
+
+// fhirObsIdentityKey keys a vital by its coded concept, not code.text.
+func fhirObsIdentityKey(res map[string]any) string {
+	if code, ok := res["code"].(map[string]any); ok {
+		if k := codeableConceptKey(code); k != "" {
+			return k
+		}
+		if t := strings.TrimSpace(output.Extract(code, "text")); t != "" {
+			return "text|" + t
+		}
+	}
+	if id := strings.TrimSpace(output.Extract(res, "id")); id != "" {
+		return "id|" + id
+	}
+	return "unknown|obs"
+}
+
+// restOrderIdentityKey uses OpenMRS concept/drug UUIDs when the
+// representation carries them.
+func restOrderIdentityKey(rec map[string]any) string {
+	if u := strings.TrimSpace(output.Extract(rec, "concept.uuid")); u != "" {
+		return "concept|" + u
+	}
+	if u := strings.TrimSpace(output.Extract(rec, "drug.uuid")); u != "" {
+		return "drug|" + u
+	}
+	if u := strings.TrimSpace(output.Extract(rec, "uuid")); u != "" {
+		return "order|" + u
+	}
+	return "unknown|order"
+}
+
+// codeableConceptKey returns "system|code" from the first coding with a
+// code (OpenMRS FHIR usually puts the concept uuid or mapping here).
+func codeableConceptKey(cc map[string]any) string {
+	for _, c := range asSlice(cc["coding"]) {
+		cm, _ := c.(map[string]any)
+		code, _ := cm["code"].(string)
+		code = strings.TrimSpace(code)
+		if code == "" {
+			continue
+		}
+		sys, _ := cm["system"].(string)
+		return strings.TrimSpace(sys) + "|" + code
+	}
+	return ""
+}
+
+func medsDisplay(res map[string]any) string {
+	return output.Extract(res, "medicationReference.display|medicationCodeableConcept.text|display")
 }
 
 // encountersSection fetches all encounters, keeps the most recent N, and
