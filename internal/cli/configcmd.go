@@ -16,6 +16,7 @@ var configCmd = &cobra.Command{
 
 Profiles hold a server URL and credentials. The default profile is used
 unless overridden by --profile, OMRS_PROFILE, or connection flags.`,
+	RunE: groupRunE,
 }
 
 var configInitCmd = &cobra.Command{

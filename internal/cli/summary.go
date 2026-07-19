@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"net/url"
-	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -33,6 +32,10 @@ type section struct {
 	Source string `json:"source,omitempty"`
 	Items  []any  `json:"items"`
 	Error  string `json:"error,omitempty"`
+	// Partial is true when the section's top-level fetch succeeded but a
+	// nested fetch (e.g. one encounter's obs) failed; the failed child
+	// carries its own marker.
+	Partial bool `json:"partial,omitempty"`
 }
 
 var patientSummaryCmd = &cobra.Command{
@@ -111,14 +114,24 @@ func runPatientSummary(cmd *cobra.Command, args []string) error {
 
 	wg.Wait()
 
+	// counts gives a reader (human or agent) the shape of the record
+	// before the bulk of the payload — it marshals first alphabetically.
+	counts := map[string]int{}
+	for name, s := range sections {
+		counts[name] = len(s.Items)
+	}
 	result := map[string]any{
+		"counts":   counts,
 		"patient":  patient,
 		"sections": sections,
 	}
 
 	for name, s := range sections {
 		if s.Status == "unavailable" {
-			fmt.Fprintf(os.Stderr, `{"warning":"section %q unavailable: %s"}`+"\n", name, s.Error)
+			output.Warn("section %q unavailable: %s", name, s.Error)
+		}
+		if s.Partial {
+			output.Warn("section %q is partial: one or more nested fetches failed", name)
 		}
 	}
 
@@ -140,14 +153,15 @@ func resolvePatient(c *client.Client, ref string) (map[string]any, error) {
 		return nil, err
 	}
 	results, _ := data["results"].([]any)
-	// Prefer exact identifier matches over fuzzy name hits.
+	// Prefer exact identifier matches over fuzzy name hits, using the
+	// structured identifier value (not the display label).
 	var matches []map[string]any
 	for _, r := range results {
 		rec, _ := r.(map[string]any)
 		for _, idAny := range asSlice(rec["identifiers"]) {
 			id, _ := idAny.(map[string]any)
-			display, _ := id["display"].(string)
-			if _, val, ok := strings.Cut(display, "= "); ok && strings.EqualFold(strings.TrimSpace(val), ref) {
+			val, _ := id["identifier"].(string)
+			if strings.EqualFold(strings.TrimSpace(val), ref) {
 				matches = append(matches, rec)
 				break
 			}
@@ -159,19 +173,34 @@ func resolvePatient(c *client.Client, ref string) (map[string]any, error) {
 	}
 	switch len(matches) {
 	case 0:
-		return nil, &client.APIError{Message: fmt.Sprintf("no patient found with identifier %q", ref), Code: client.CodeNotFound}
+		// Multiple fuzzy hits with no exact identifier match is
+		// ambiguity, not absence — report the candidates, never
+		// "not found" (which an agent reads as "patient doesn't exist").
+		if len(results) > 1 {
+			return nil, ambiguityError(ref, results)
+		}
+		return nil, &client.APIError{Message: fmt.Sprintf("no patient found matching %q", ref), Code: client.CodeNotFound}
 	case 1:
 		return matches[0], nil
 	default:
-		var cands []string
-		for _, m := range matches {
-			cands = append(cands, fmt.Sprintf("%s (%s)", output.Extract(m, "display"), output.Extract(m, "uuid")))
+		recs := make([]any, len(matches))
+		for i, m := range matches {
+			recs[i] = m
 		}
-		return nil, &client.APIError{
-			Message: fmt.Sprintf("identifier %q matches %d patients; use a UUID", ref, len(matches)),
-			Code:    client.CodeBadRequest,
-			Detail:  strings.Join(cands, "; "),
-		}
+		return nil, ambiguityError(ref, recs)
+	}
+}
+
+func ambiguityError(ref string, candidates []any) *client.APIError {
+	var cands []string
+	for _, r := range candidates {
+		rec, _ := r.(map[string]any)
+		cands = append(cands, fmt.Sprintf("%s (%s)", output.Extract(rec, "display"), output.Extract(rec, "uuid")))
+	}
+	return &client.APIError{
+		Message: fmt.Sprintf("%q matches %d patients; use a UUID or an exact identifier", ref, len(candidates)),
+		Code:    client.CodeBadRequest,
+		Detail:  strings.Join(cands, "; "),
 	}
 }
 
@@ -228,7 +257,7 @@ func medsSection(c *client.Client, uuid string) *section {
 		return &section{Status: status, Source: "fhir", Items: items}
 	}
 
-	fmt.Fprintln(os.Stderr, `{"warning":"FHIR unavailable for medications; falling back to REST orders"}`)
+	output.Warn("FHIR unavailable for medications; falling back to REST orders")
 	data, err := c.Get("order", url.Values{"patient": {uuid}, "v": {"default"}, "limit": {"100"}})
 	if err != nil {
 		return &section{Status: "unavailable", Source: "rest-orders", Items: []any{}, Error: err.Error()}
@@ -298,6 +327,8 @@ func encountersSection(c *client.Client, uuid string) *section {
 	}
 
 	var wg sync.WaitGroup
+	var mu sync.Mutex
+	partial := false
 	for _, e := range encs {
 		enc, _ := e.(map[string]any)
 		wg.Add(1)
@@ -306,10 +337,18 @@ func encountersSection(c *client.Client, uuid string) *section {
 			encUUID, _ := enc["uuid"].(string)
 			obsData, err := c.Get("obs", url.Values{"encounter": {encUUID}, "v": {"default"}, "limit": {"100"}})
 			if err != nil {
+				// A failed obs fetch must not masquerade as "no obs
+				// recorded" — mark it unavailable, per the tri-state.
 				enc["obs"] = []any{}
+				enc["obsStatus"] = "unavailable"
+				enc["obsError"] = err.Error()
+				mu.Lock()
+				partial = true
+				mu.Unlock()
 				return
 			}
 			enc["obs"] = asSlice(obsData["results"])
+			enc["obsStatus"] = "ok"
 		}(enc)
 	}
 	wg.Wait()
@@ -319,7 +358,7 @@ func encountersSection(c *client.Client, uuid string) *section {
 		status = "none"
 		encs = []any{}
 	}
-	return &section{Status: status, Source: "rest", Items: encs}
+	return &section{Status: status, Source: "rest", Items: encs, Partial: partial}
 }
 
 func asSlice(v any) []any {
@@ -370,6 +409,10 @@ func renderSummary(patient map[string]any, sections map[string]*section) {
 				rec, _ := item.(map[string]any)
 				fmt.Printf("  • %s\n", line(rec))
 				if name == "encounters" {
+					if rec["obsStatus"] == "unavailable" {
+						fmt.Println("      (observations unavailable — fetch failed)")
+						continue
+					}
 					for _, o := range asSlice(rec["obs"]) {
 						ob, _ := o.(map[string]any)
 						fmt.Printf("      - %s\n", output.Extract(ob, "display"))

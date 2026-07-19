@@ -241,6 +241,14 @@ func isUsageError(msg string) bool {
 	return false
 }
 
+// Warn emits an advisory one-line JSON warning to stderr. Always
+// marshaled — never hand-built — so embedded quotes can't produce
+// invalid JSON on the wire agents parse.
+func Warn(format string, args ...any) {
+	b, _ := json.Marshal(map[string]string{"warning": fmt.Sprintf(format, args...)})
+	fmt.Fprintln(os.Stderr, string(b))
+}
+
 // PrintError writes the error to stderr and returns the process exit
 // code. Agents (stderr piped, or --json) get one-line structured JSON;
 // humans at a terminal get plain readable text.

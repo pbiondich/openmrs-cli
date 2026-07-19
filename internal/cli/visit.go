@@ -11,6 +11,7 @@ var visitPatient, visitSince, visitUntil string
 var visitCmd = &cobra.Command{
 	Use:   "visit",
 	Short: "List and retrieve visits",
+	RunE:  groupRunE,
 }
 
 var visitListCmd = &cobra.Command{

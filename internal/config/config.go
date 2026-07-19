@@ -4,6 +4,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -45,6 +46,13 @@ type Overrides struct {
 	User     string
 	Password string
 	Profile  string
+}
+
+// warnJSON emits an advisory one-line JSON warning to stderr (this
+// package can't import internal/output without a cycle).
+func warnJSON(msg string) {
+	b, _ := json.Marshal(map[string]string{"warning": msg})
+	fmt.Fprintln(os.Stderr, string(b))
 }
 
 func Path() string {
@@ -136,8 +144,17 @@ func Resolve(o Overrides) (Resolved, error) {
 				res.User = p.User
 			}
 			if p.PasswordStore == "keychain" {
-				if pw, err := secrets.Get(profileName); err == nil {
+				// A failed credential-store read must not fall through
+				// silently — the resulting 401 would tell the user their
+				// password is wrong when it was never read at all.
+				pw, err := secrets.Get(profileName)
+				switch {
+				case err == nil:
 					res.Password = pw
+				case errors.Is(err, secrets.ErrNotFound):
+					warnJSON(fmt.Sprintf("profile %q expects a credential-store entry but none was found; run 'omrs login'", profileName))
+				default:
+					warnJSON(fmt.Sprintf("credential store read failed for profile %q: %v; requests will be unauthenticated", profileName, err))
 				}
 			} else if p.Password != "" {
 				res.Password = p.Password

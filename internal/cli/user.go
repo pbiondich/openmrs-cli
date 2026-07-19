@@ -11,6 +11,7 @@ var userQuery string
 var userCmd = &cobra.Command{
 	Use:   "user",
 	Short: "List and retrieve users",
+	RunE:  groupRunE,
 }
 
 var userListCmd = &cobra.Command{

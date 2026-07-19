@@ -11,6 +11,7 @@ var encounterPatient, encounterType, encounterSince, encounterUntil string
 var encounterCmd = &cobra.Command{
 	Use:   "encounter",
 	Short: "List and retrieve encounters",
+	RunE:  groupRunE,
 }
 
 var encounterListCmd = &cobra.Command{

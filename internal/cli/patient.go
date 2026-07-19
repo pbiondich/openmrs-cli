@@ -11,6 +11,7 @@ var patientByIdentifier bool
 var patientCmd = &cobra.Command{
 	Use:   "patient",
 	Short: "Search and retrieve patients",
+	RunE:  groupRunE,
 }
 
 var patientSearchCmd = &cobra.Command{

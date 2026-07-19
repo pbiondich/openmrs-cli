@@ -85,6 +85,20 @@ func Execute() int {
 	return 0
 }
 
+// groupRunE is the RunE for parent commands like `omrs patient`: bare
+// invocation shows help (exit 0); an unrecognized subcommand is a USAGE
+// error on stderr with exit 1 — never exit-0 help on stdout, which an
+// agent reads as success.
+func groupRunE(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return cmd.Help()
+	}
+	return &client.APIError{
+		Message: fmt.Sprintf("unknown subcommand %q for %q", args[0], cmd.CommandPath()),
+		Code:    client.CodeUsage,
+	}
+}
+
 // newClient resolves connection settings and builds an API client.
 func newClient() (*client.Client, error) {
 	res, err := config.Resolve(config.Overrides{
@@ -177,6 +191,6 @@ func getCmd(resource, apiPath string) *cobra.Command {
 
 func warnIfNoFilter(params url.Values, hint string) {
 	if len(params) == 0 && !flags.all {
-		fmt.Fprintf(os.Stderr, `{"warning":"no filter given; OpenMRS may return an empty list — try %s"}`+"\n", hint)
+		output.Warn("no filter given; OpenMRS may return an empty list — try %s", hint)
 	}
 }

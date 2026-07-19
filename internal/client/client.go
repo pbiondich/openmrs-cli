@@ -180,7 +180,10 @@ func firstLine(s string) string {
 }
 
 // GetAll follows links[rel=next] pagination, accumulating results up to cap.
-// Returns {"results": [...]} in the same shape as a single page.
+// Returns {"results": [...]} in the same shape as a single page. A capped
+// fetch sets "truncated": true in the payload — stdout must carry the
+// incompleteness signal, not just stderr — and totalCount is passed
+// through when the server sent one.
 func (c *Client) GetAll(path string, params url.Values, capItems int) (map[string]any, error) {
 	u := c.baseURL + "/ws/rest/v1/" + strings.TrimLeft(path, "/")
 	if len(params) > 0 {
@@ -188,6 +191,8 @@ func (c *Client) GetAll(path string, params url.Values, capItems int) (map[strin
 	}
 
 	var all []any
+	truncated := false
+	var totalCount any
 	for u != "" {
 		page, err := c.getURL(u)
 		if err != nil {
@@ -195,14 +200,28 @@ func (c *Client) GetAll(path string, params url.Values, capItems int) (map[strin
 		}
 		results, _ := page["results"].([]any)
 		all = append(all, results...)
+		if tc, ok := page["totalCount"]; ok {
+			totalCount = tc
+		}
 		if len(all) >= capItems {
 			all = all[:capItems]
-			fmt.Fprintf(os.Stderr, `{"warning":"pagination cap (%d) reached; results truncated"}`+"\n", capItems)
+			truncated = true
+			warn, _ := json.Marshal(map[string]string{
+				"warning": fmt.Sprintf("pagination cap (%d) reached; results truncated", capItems),
+			})
+			fmt.Fprintln(os.Stderr, string(warn))
 			break
 		}
 		u = nextLink(page)
 	}
-	return map[string]any{"results": all}, nil
+	out := map[string]any{"results": all}
+	if truncated {
+		out["truncated"] = true
+	}
+	if totalCount != nil {
+		out["totalCount"] = totalCount
+	}
+	return out, nil
 }
 
 func nextLink(page map[string]any) string {

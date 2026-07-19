@@ -11,6 +11,7 @@ var locationTag string
 var locationCmd = &cobra.Command{
 	Use:   "location",
 	Short: "List and retrieve locations",
+	RunE:  groupRunE,
 }
 
 var locationListCmd = &cobra.Command{

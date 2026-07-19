@@ -2,11 +2,12 @@ package cli
 
 import (
 	"fmt"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/pbiondich/openmrs-cli/internal/output"
 )
 
 var relativeRe = regexp.MustCompile(`^(\d+)([dwmy])$`)
@@ -112,8 +113,6 @@ func parseServerDatetime(s string) (time.Time, bool) {
 // fetch, so a page-limited result set may hide matches on later pages.
 func warnClientSideFilter(resource string) {
 	if !flags.all {
-		fmt.Fprintf(os.Stderr,
-			`{"warning":"%s date filtering is applied client-side after fetch; add --all to filter the complete result set"}`+"\n",
-			resource)
+		output.Warn("%s date filtering is applied client-side after fetch; add --all to filter the complete result set", resource)
 	}
 }

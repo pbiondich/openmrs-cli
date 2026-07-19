@@ -11,6 +11,7 @@ var providerQuery string
 var providerCmd = &cobra.Command{
 	Use:   "provider",
 	Short: "List and retrieve providers",
+	RunE:  groupRunE,
 }
 
 var providerListCmd = &cobra.Command{

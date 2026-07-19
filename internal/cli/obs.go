@@ -14,6 +14,7 @@ var obsPatient, obsEncounter, obsConcept, obsSince, obsUntil string
 var obsCmd = &cobra.Command{
 	Use:   "obs",
 	Short: "List and retrieve observations",
+	RunE:  groupRunE,
 }
 
 var obsListCmd = &cobra.Command{

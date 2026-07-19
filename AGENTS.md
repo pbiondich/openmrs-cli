@@ -11,8 +11,24 @@ Everything is discoverable: start with `omrs --help`, then `<command> --help`.
 The output contract:
 
 - Results go to stdout. When stdout is piped (your case), output is JSON.
-- Errors go to stderr as one-line JSON: `{"error":"...","code":"AUTH","httpStatus":401,"detail":"..."}`
-- Exit codes are stable: `0` success, `1` unknown/usage, `2` auth, `3` connection/timeout, `4` not found, `5` bad request.
+- Errors go to stderr as one-line JSON: `{"error":"...","code":"...","httpStatus":...,"detail":"..."}`
+- The `code` literals and their exit codes:
+
+  | code | exit | meaning |
+  |------|------|---------|
+  | `UNKNOWN` | 1 | unclassified failure |
+  | `USAGE` | 1 | bad command, flag, or arguments |
+  | `AUTH` | 2 | HTTP 401/403, or not authenticated |
+  | `CONNECTION` | 3 | network failure or timeout |
+  | `NOT_FOUND` | 4 | HTTP 404 / no match |
+  | `BAD_REQUEST` | 5 | HTTP 400, or an ambiguous patient reference (candidates in `detail`) |
+
+- stderr also carries advisory one-line JSON of a second shape:
+  `{"warning":"..."}` — no `code` field, exit code unaffected. Warnings
+  flag things like client-side filtering, a truncated `--all` fetch, or a
+  credential-store problem. Treat them as context, not failure.
+- A capped `--all` fetch also sets `"truncated": true` in the stdout
+  payload itself — check for it before treating results as complete.
 
 Bootstrapping against a server:
 
@@ -29,10 +45,15 @@ For a full clinical picture of one patient, prefer
 yourself: it fans out REST+FHIR queries in parallel and returns
 IPS-aligned sections. Any identifier type resolves the patient on an
 exact value match (so does a UUID or a unique name); an ambiguous
-reference errors with the candidates listed. Each section reports `status` (`ok` | `none` | `unavailable`)
-and `source` — treat `none` as "nothing recorded" and `unavailable` as
-"could not fetch"; never conflate them. UUIDs are preserved on every
-item for follow-up queries.
+reference errors with the candidates listed. Read the top-level `counts`
+object FIRST — it gives every section's item count up front, so you know
+the record's shape before (and regardless of how far) you read the rest.
+Each section reports `status` (`ok` | `none` | `unavailable`) and
+`source` — treat `none` as "nothing recorded" and `unavailable` as
+"could not fetch"; never conflate them. A section may also carry
+`partial: true`, meaning a nested fetch failed (the affected item is
+marked, e.g. `obsStatus: "unavailable"` on one encounter). UUIDs are
+preserved on every item for follow-up queries.
 
 Every other REST resource is reachable through the escape hatch:
 

@@ -114,7 +114,7 @@ For scripts and agents, use --password-stdin:
 		p := config.Profile{URL: serverURL, User: username}
 		storage := secrets.StoreName()
 		if err := secrets.Set(profileName, password); err != nil {
-			fmt.Fprintf(os.Stderr, `{"warning":"OS credential store unavailable (%v); storing password in config file"}`+"\n", err)
+			output.Warn("OS credential store unavailable (%v); storing password in config file", err)
 			p.Password = password
 			storage = "config file"
 		} else {
@@ -153,7 +153,7 @@ var logoutCmd = &cobra.Command{
 			return fmt.Errorf("profile %q not found", profileName)
 		}
 		if err := secrets.Delete(profileName); err != nil {
-			fmt.Fprintf(os.Stderr, `{"warning":"could not remove credential-store entry: %v"}`+"\n", err)
+			output.Warn("could not remove credential-store entry: %v", err)
 		}
 		p.Password = ""
 		p.PasswordStore = ""

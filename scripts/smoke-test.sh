@@ -78,6 +78,21 @@ else
   echo "FAIL: patient summary (could not resolve test patient)"; FAIL=$((FAIL + 1))
 fi
 check_exit "summary not-found is exit 4" 4 "${AUTH[@]}" patient summary NO-SUCH-MRN-999
+check_exit "ambiguous reference is exit 5" 5 "${AUTH[@]}" patient summary john
+check_exit "unknown subcommand is exit 1" 1 patient bogus-subcommand-xyz
+
+# summary counts index present and consistent with sections
+if [[ -n "$SUMMARY_UUID" ]] && "$OMRS" "${AUTH[@]}" patient summary "$SUMMARY_UUID" --sections problems,meds --json 2>/dev/null \
+  | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+c = d.get("counts", {})
+ok = set(c) == set(d["sections"]) and all(c[k] == len(d["sections"][k]["items"]) for k in c)
+sys.exit(0 if ok else 1)'; then
+  echo "PASS: summary counts index"; PASS=$((PASS + 1))
+else
+  echo "FAIL: summary counts index"; FAIL=$((FAIL + 1))
+fi
 check_exit "bad --since rejected"    1  "${AUTH[@]}" encounter list --since "not-a-date"
 check_exit "auth error is exit 2"    2  -s "$SERVER" -u admin -p wrongpass patient search john
 check_exit "connection error is exit 3" 3 -s https://no-such-host-omrs.invalid/openmrs ping

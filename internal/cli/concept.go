@@ -11,6 +11,7 @@ var conceptClass, conceptSource string
 var conceptCmd = &cobra.Command{
 	Use:   "concept",
 	Short: "Search and retrieve concepts",
+	RunE:  groupRunE,
 }
 
 var conceptSearchCmd = &cobra.Command{
