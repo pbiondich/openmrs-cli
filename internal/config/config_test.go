@@ -24,6 +24,27 @@ func withTempConfig(t *testing.T, cfg *Config) {
 	}
 }
 
+func TestNormalizeServerURL(t *testing.T) {
+	ok, err := NormalizeServerURL("https://demo.example/openmrs/")
+	if err != nil || ok != "https://demo.example/openmrs" {
+		t.Fatalf("got %q err=%v", ok, err)
+	}
+	if _, err := NormalizeServerURL("https://user:pass@demo.example/openmrs"); err == nil {
+		t.Fatal("userinfo should fail")
+	}
+	if _, err := NormalizeServerURL("ftp://demo.example/openmrs"); err == nil {
+		t.Fatal("ftp should fail")
+	}
+	// localhost http is fine
+	if _, err := NormalizeServerURL("http://localhost/openmrs"); err != nil {
+		t.Fatal(err)
+	}
+	// remote http is allowed but warns (we only check no error)
+	if _, err := NormalizeServerURL("http://example.com/openmrs"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDefaultHasNoPasswords(t *testing.T) {
 	d := Default()
 	for name, p := range d.Profiles {

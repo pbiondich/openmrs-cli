@@ -241,6 +241,38 @@ func TestSanitizeNextURLRejectsUserinfo(t *testing.T) {
 	}
 }
 
+func TestSanitizeNextURLRejectsNonAPIPath(t *testing.T) {
+	c := New(config.Resolved{URL: "https://demo.example/openmrs"})
+	_, err := c.sanitizeNextURL("https://demo.example/admin")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestOffOriginRedirectRefused(t *testing.T) {
+	// First hop 302 to evil host; client must not follow.
+	var hops atomic.Int32
+	evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hops.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(evil.Close)
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, evil.URL+"/steal", http.StatusFound)
+	}))
+	t.Cleanup(origin.Close)
+
+	c := New(config.Resolved{URL: origin.URL, User: "u", Password: "p"})
+	_, err := c.Get("session", nil)
+	if err == nil {
+		t.Fatal("expected redirect error")
+	}
+	if hops.Load() != 0 {
+		t.Fatalf("evil host was contacted %d times", hops.Load())
+	}
+}
+
 func TestGetQueryParams(t *testing.T) {
 	var got url.Values
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

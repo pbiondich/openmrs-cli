@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/pbiondich/openmrs-cli/internal/secrets"
 )
@@ -124,6 +127,44 @@ func Save(cfg *Config) error {
 	return os.Chmod(path, 0o600)
 }
 
+// NormalizeServerURL validates and normalizes an OpenMRS base URL.
+// Rejects non-http(s) schemes and embedded userinfo (credentials in the URL).
+// Cleartext HTTP to a non-loopback host emits a stderr warning.
+func NormalizeServerURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("empty server URL")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid server URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("server URL must use http or https, got %q", u.Scheme)
+	}
+	if u.User != nil {
+		return "", fmt.Errorf("server URL must not embed credentials; use omrs login or OMRS_PASSWORD")
+	}
+	if u.Host == "" {
+		return "", fmt.Errorf("server URL missing host")
+	}
+	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
+		warnJSON("using cleartext HTTP to a non-local host; credentials will be sent unencrypted")
+	}
+	return strings.TrimRight(raw, "/"), nil
+}
+
+func isLoopbackHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // Resolve applies precedence: flags > env > named profile > defaultProfile > built-ins.
 func Resolve(o Overrides) (Resolved, error) {
 	cfg, err := Load()
@@ -213,6 +254,12 @@ func Resolve(o Overrides) (Resolved, error) {
 		return Resolved{}, fmt.Errorf("%w: profile %q expects a credential-store entry but none was found; run 'omrs login' or set OMRS_PASSWORD",
 			ErrCredentialStore, keychainProfile)
 	}
+
+	norm, err := NormalizeServerURL(res.URL)
+	if err != nil {
+		return Resolved{}, err
+	}
+	res.URL = norm
 
 	return res, nil
 }

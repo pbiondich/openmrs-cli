@@ -1,7 +1,11 @@
 package cli
 
 import (
+	"bufio"
 	"fmt"
+	"io"
+	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -61,17 +65,22 @@ var configShowCmd = &cobra.Command{
 	},
 }
 
-var setProfileURL, setProfileUser, setProfilePassword string
+var (
+	setProfileURL           string
+	setProfileUser          string
+	setProfilePasswordStdin bool
+)
 
 var configSetProfileCmd = &cobra.Command{
 	Use:   "set-profile <name>",
 	Short: "Create or update a named profile",
 	Long: `Create or update a named profile's URL and username.
 
-Prefer omrs login to store a password (OS credential store). If you must
-set a password here, it is written to the credential store when available
-and never left on disk when the store succeeds. The --password flag still
-appears in process listings — prefer login or OMRS_PASSWORD for scripts.`,
+Prefer omrs login to store a password (OS credential store). To set a
+password without a full login probe, use --password-stdin (never a
+password flag — secrets must not appear in process listings):
+
+  echo "$OMRS_PW" | omrs config set-profile local --url http://localhost/openmrs --user admin --password-stdin`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
@@ -81,17 +90,30 @@ appears in process listings — prefer login or OMRS_PASSWORD for scripts.`,
 		}
 		p := cfg.Profiles[name]
 		if setProfileURL != "" {
-			p.URL = setProfileURL
+			norm, err := config.NormalizeServerURL(setProfileURL)
+			if err != nil {
+				return err
+			}
+			p.URL = norm
 		}
 		if setProfileUser != "" {
 			p.User = setProfileUser
 		}
-		if setProfilePassword != "" {
+		if setProfilePasswordStdin {
+			reader := bufio.NewReader(os.Stdin)
+			line, err := reader.ReadString('\n')
+			if err != nil && err != io.EOF {
+				return fmt.Errorf("reading password from stdin: %w", err)
+			}
+			password := strings.TrimRight(line, "\r\n")
+			if password == "" {
+				return fmt.Errorf("no password provided on stdin")
+			}
 			// Prefer keychain; fall back to config file. Clear the other
 			// so there is a single source of truth.
-			if err := secrets.Set(name, setProfilePassword); err != nil {
+			if err := secrets.Set(name, password); err != nil {
 				output.Warn("OS credential store unavailable (%v); storing password in config file", err)
-				p.Password = setProfilePassword
+				p.Password = password
 				p.PasswordStore = ""
 			} else {
 				p.Password = ""
@@ -100,6 +122,12 @@ appears in process listings — prefer login or OMRS_PASSWORD for scripts.`,
 		}
 		if p.URL == "" {
 			return fmt.Errorf("--url is required for a new profile")
+		}
+		// Re-validate even if URL came from an existing profile only.
+		if norm, err := config.NormalizeServerURL(p.URL); err != nil {
+			return err
+		} else {
+			p.URL = norm
 		}
 		cfg.Profiles[name] = p
 		if cfg.DefaultProfile == "" {
@@ -166,7 +194,7 @@ var configUseCmd = &cobra.Command{
 func init() {
 	configSetProfileCmd.Flags().StringVar(&setProfileURL, "url", "", "server URL, e.g. https://dev3.openmrs.org/openmrs")
 	configSetProfileCmd.Flags().StringVar(&setProfileUser, "user", "", "username")
-	configSetProfileCmd.Flags().StringVar(&setProfilePassword, "password", "", "password")
+	configSetProfileCmd.Flags().BoolVar(&setProfilePasswordStdin, "password-stdin", false, "read password from stdin (never put passwords on the command line)")
 	configCmd.AddCommand(configInitCmd, configShowCmd, configSetProfileCmd, configRemoveProfileCmd, configUseCmd)
 	rootCmd.AddCommand(configCmd)
 }

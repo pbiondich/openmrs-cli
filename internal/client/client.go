@@ -71,15 +71,23 @@ type Client struct {
 	ctx context.Context
 }
 
-// New builds a client with a default 30s per-request timeout.
+// New builds a client with a default 30s per-request timeout and
+// same-origin redirect policy (blocks redirect-based SSRF).
 func New(r config.Resolved) *Client {
-	return NewWithHTTP(r, &http.Client{Timeout: defaultTimeout})
+	return NewWithHTTP(r, defaultHTTPClient())
 }
 
 // NewWithHTTP builds a client with a custom HTTP client (tests, custom transport).
+// If hc is nil, defaultHTTPClient is used. If hc is non-nil but has no
+// CheckRedirect, same-origin redirect policy is installed.
 func NewWithHTTP(r config.Resolved, hc *http.Client) *Client {
 	if hc == nil {
-		hc = &http.Client{Timeout: defaultTimeout}
+		hc = defaultHTTPClient()
+	} else if hc.CheckRedirect == nil {
+		// Copy so we don't mutate a shared client unexpectedly.
+		cp := *hc
+		cp.CheckRedirect = sameOriginRedirect
+		hc = &cp
 	}
 	return &Client{
 		baseURL: strings.TrimRight(r.URL, "/"),
@@ -87,6 +95,30 @@ func NewWithHTTP(r config.Resolved, hc *http.Client) *Client {
 		pass:    r.Password,
 		http:    hc,
 	}
+}
+
+func defaultHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout:       defaultTimeout,
+		CheckRedirect: sameOriginRedirect,
+	}
+}
+
+// sameOriginRedirect refuses cross-host/scheme redirects so a 302 cannot
+// pivot Basic Auth traffic (or the request itself) to an attacker or
+// cloud-metadata address. Same-origin redirects remain allowed.
+func sameOriginRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	if len(via) == 0 {
+		return nil
+	}
+	orig := via[0].URL
+	if !strings.EqualFold(req.URL.Scheme, orig.Scheme) || !strings.EqualFold(req.URL.Host, orig.Host) {
+		return fmt.Errorf("refusing off-origin redirect to %s", req.URL.Host)
+	}
+	return nil
 }
 
 // WithContext returns a shallow copy that uses ctx for subsequent requests.
@@ -344,6 +376,14 @@ func (c *Client) sanitizeNextURL(next string) (string, error) {
 	if !strings.EqualFold(u.Scheme, base.Scheme) || !strings.EqualFold(u.Host, base.Host) {
 		return "", &APIError{
 			Message: fmt.Sprintf("refusing off-origin pagination link %s (expected host %s)", u.Host, base.Host),
+			Code:    CodeBadRequest,
+		}
+	}
+	// Keep next links under OpenMRS API paths so same-host pivots to
+	// admin/actuator URLs do not ride Basic Auth.
+	if !strings.Contains(u.Path, "/ws/rest/") && !strings.Contains(u.Path, "/ws/fhir2/") {
+		return "", &APIError{
+			Message: "refusing pagination next link outside OpenMRS REST/FHIR API path",
 			Code:    CodeBadRequest,
 		}
 	}

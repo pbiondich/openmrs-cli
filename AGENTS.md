@@ -142,6 +142,7 @@ Invariants to preserve (breaking these breaks scripted and agent users):
 1. The output contract above: stdout data, stderr one-line JSON errors when piped, stable exit codes.
 2. No built-in default credentials, ever.
 3. Passwords never in process args, shell history, or plaintext files when a credential store is available.
+   Use `login` or `config set-profile --password-stdin` — never a `--password` flag.
 4. The dependency budget stays minimal (currently cobra, x/term, go-keyring). Justify any addition.
 5. v1 is read-only: no POST/PUT/DELETE without an explicit, deliberate design pass.
 

@@ -148,7 +148,11 @@ func runLoginDemo(cfg *config.Config) error {
 // When setDefault is true, the profile becomes the default even if another
 // default already exists (used by --demo so queries work immediately).
 func completeLogin(cfg *config.Config, profileName, serverURL, username, password string, setDefault bool) error {
-	serverURL = strings.TrimRight(serverURL, "/")
+	norm, err := config.NormalizeServerURL(serverURL)
+	if err != nil {
+		return err
+	}
+	serverURL = norm
 
 	c := client.New(config.Resolved{URL: serverURL, User: username, Password: password})
 	data, err := c.Get("session", url.Values{})
