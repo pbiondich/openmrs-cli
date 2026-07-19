@@ -37,13 +37,28 @@ const allSections = "visit,problems,meds,allergies,vitals,encounters,programs"
 //	withheld       the server denied access, HTTP 403    (state 6, FHIR withheld)
 //
 // State 5 (partial) is the section's Partial flag plus per-item markers,
-// and the truncated key on --all fetches.
+// and Truncated when a hard fetch cap may have dropped rows.
 const (
 	statusOK            = "ok"
 	statusConfirmedNone = "confirmed-none"
 	statusNone          = "none"
 	statusUnavailable   = "unavailable"
 	statusWithheld      = "withheld"
+
+	// Per-encounter obsStatus when the obs page filled the request limit.
+	obsStatusOK          = "ok"
+	obsStatusUnavailable = "unavailable"
+	obsStatusPartial     = "partial"
+)
+
+// Fetch caps for summary sections. Hitting a cap sets Partial+Truncated
+// so agents never treat a full page as a complete chart.
+const (
+	medsFHIRCount        = 100
+	medsRESTLimit        = 100
+	vitalsFHIRCount      = 40
+	obsPerEncounterLimit = 100
+	encountersGetAllCap  = 2000
 )
 
 // statusForError maps a failed fetch to unavailable, or withheld when
@@ -64,10 +79,13 @@ type section struct {
 	Source string `json:"source,omitempty"`
 	Items  []any  `json:"items"`
 	Error  string `json:"error,omitempty"`
-	// Partial is true when the section's top-level fetch succeeded but a
-	// nested fetch (e.g. one encounter's obs) failed; the failed child
-	// carries its own marker.
+	// Partial is true when the section is incomplete for any reason:
+	// nested fetch failure, and/or a hard fetch cap (see Truncated).
 	Partial bool `json:"partial,omitempty"`
+	// Truncated is true when a page size / item cap may have dropped rows
+	// (same idea as truncated on --all list fetches). Cap hits set both
+	// Truncated and Partial.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 var patientSummaryCmd = &cobra.Command{
@@ -87,8 +105,10 @@ applies. Medications and vitals prefer the FHIR2 module and fall back to
 REST (noted in the output). Section statuses follow a six-state absence
 model: ok, confirmed-none (the record asserts absence), none (nothing
 recorded, no assertion), unavailable (fetch failed), withheld (access
-denied), plus a partial flag for nested failures. A failed section never
-stops the rest of the summary from rendering.`,
+denied), plus partial (and truncated when a fetch cap may have dropped
+rows). Treat none/ok as complete only when partial and truncated are
+absent. A failed section never stops the rest of the summary from
+rendering.`,
 	Example: `  omrs patient summary 5574MO-2
   omrs patient summary dd8e5b3d-1691-11df-97a5-7038c432aabf
   omrs patient summary 5574MO-2 --sections problems,meds,allergies --json`,
@@ -163,8 +183,10 @@ func runPatientSummary(cmd *cobra.Command, args []string) error {
 		if s.Status == statusUnavailable || s.Status == statusWithheld {
 			output.Warn("section %q unavailable: %s", name, s.Error)
 		}
-		if s.Partial {
-			output.Warn("section %q is partial: one or more nested fetches failed", name)
+		if s.Truncated {
+			output.Warn("section %q is truncated: a fetch cap may have omitted rows", name)
+		} else if s.Partial {
+			output.Warn("section %q is partial: nested fetch failed or results incomplete", name)
 		}
 	}
 
@@ -319,12 +341,15 @@ func allergiesSection(c *client.Client, uuid string) *section {
 // back to REST orders. The FHIR status search param is broken on some
 // fhir2 versions, so active-filtering happens client-side.
 func medsSection(c *client.Client, uuid string) *section {
-	bundle, err := c.GetFHIR("MedicationRequest", url.Values{"patient": {uuid}, "_count": {"100"}})
+	bundle, err := c.GetFHIR("MedicationRequest", url.Values{
+		"patient": {uuid}, "_count": {fmt.Sprint(medsFHIRCount)},
+	})
 	if err == nil {
+		entries := asSlice(bundle["entry"])
 		// One drug can carry many still-active refill orders; the med
 		// list wants unique drugs, most recent order winning.
 		latest := map[string]map[string]any{}
-		for _, e := range asSlice(bundle["entry"]) {
+		for _, e := range entries {
 			entry, _ := e.(map[string]any)
 			res, _ := entry["resource"].(map[string]any)
 			if res["status"] != "active" {
@@ -346,32 +371,25 @@ func medsSection(c *client.Client, uuid string) *section {
 			return output.Extract(a, "medicationReference.display|medicationCodeableConcept.text") <
 				output.Extract(b, "medicationReference.display|medicationCodeableConcept.text")
 		})
-		status := statusOK
-		if len(items) == 0 {
-			status = statusNone
-			items = []any{}
-		}
-		return &section{Status: status, Source: "fhir", Items: items}
+		return sectionFromItems("fhir", items, fhirBundleCapped(bundle, entries, medsFHIRCount))
 	}
 
 	output.Warn("FHIR unavailable for medications; falling back to REST orders")
-	data, err := c.Get("order", url.Values{"patient": {uuid}, "v": {"default"}, "limit": {"100"}})
+	data, err := c.Get("order", url.Values{
+		"patient": {uuid}, "v": {"default"}, "limit": {fmt.Sprint(medsRESTLimit)},
+	})
 	if err != nil {
 		return &section{Status: statusForError(err), Source: "rest-orders", Items: []any{}, Error: err.Error()}
 	}
+	raw := asSlice(data["results"])
 	var items []any
-	for _, r := range asSlice(data["results"]) {
+	for _, r := range raw {
 		rec, _ := r.(map[string]any)
 		if rec["type"] == "drugorder" && rec["action"] != "DISCONTINUE" && rec["dateStopped"] == nil {
 			items = append(items, rec)
 		}
 	}
-	status := "ok"
-	if len(items) == 0 {
-		status = "none"
-		items = []any{}
-	}
-	return &section{Status: status, Source: "rest-orders", Items: items}
+	return sectionFromItems("rest-orders", items, restPageCapped(data, raw, medsRESTLimit))
 }
 
 // vitalsSection returns the latest observation per vital-sign code via
@@ -379,14 +397,16 @@ func medsSection(c *client.Client, uuid string) *section {
 // legitimately return none.
 func vitalsSection(c *client.Client, uuid string) *section {
 	bundle, err := c.GetFHIR("Observation", url.Values{
-		"patient": {uuid}, "category": {"vital-signs"}, "_sort": {"-date"}, "_count": {"40"},
+		"patient": {uuid}, "category": {"vital-signs"}, "_sort": {"-date"},
+		"_count": {fmt.Sprint(vitalsFHIRCount)},
 	})
 	if err != nil {
 		return &section{Status: statusForError(err), Source: "fhir", Items: []any{}, Error: err.Error()}
 	}
+	entries := asSlice(bundle["entry"])
 	seen := map[string]bool{}
 	var items []any
-	for _, e := range asSlice(bundle["entry"]) {
+	for _, e := range entries {
 		entry, _ := e.(map[string]any)
 		res, _ := entry["resource"].(map[string]any)
 		code := output.Extract(res, "code.text")
@@ -396,22 +416,18 @@ func vitalsSection(c *client.Client, uuid string) *section {
 		seen[code] = true
 		items = append(items, res)
 	}
-	status := "ok"
-	if len(items) == 0 {
-		status = "none"
-		items = []any{}
-	}
-	return &section{Status: status, Source: "fhir", Items: items}
+	return sectionFromItems("fhir", items, fhirBundleCapped(bundle, entries, vitalsFHIRCount))
 }
 
 // encountersSection fetches all encounters, keeps the most recent N, and
 // attaches each one's observations.
 func encountersSection(c *client.Client, uuid string) *section {
-	data, err := c.GetAll("encounter", url.Values{"patient": {uuid}, "v": {"default"}}, 2000)
+	data, err := c.GetAll("encounter", url.Values{"patient": {uuid}, "v": {"default"}}, encountersGetAllCap)
 	if err != nil {
 		return &section{Status: statusForError(err), Source: "rest", Items: []any{}, Error: err.Error()}
 	}
 	encs := asSlice(data["results"])
+	listTruncated := data["truncated"] == true
 	sort.SliceStable(encs, func(i, j int) bool {
 		a, _ := encs[i].(map[string]any)
 		b, _ := encs[j].(map[string]any)
@@ -426,26 +442,39 @@ func encountersSection(c *client.Client, uuid string) *section {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	partial := false
+	truncated := listTruncated
 	for _, e := range encs {
 		enc, _ := e.(map[string]any)
 		wg.Add(1)
 		go func(enc map[string]any) {
 			defer wg.Done()
 			encUUID, _ := enc["uuid"].(string)
-			obsData, err := c.Get("obs", url.Values{"encounter": {encUUID}, "v": {"default"}, "limit": {"100"}})
+			obsData, err := c.Get("obs", url.Values{
+				"encounter": {encUUID}, "v": {"default"},
+				"limit": {fmt.Sprint(obsPerEncounterLimit)},
+			})
 			if err != nil {
 				// A failed obs fetch must not masquerade as "no obs
-				// recorded" — mark it unavailable, per the tri-state.
+				// recorded" — mark it unavailable.
 				enc["obs"] = []any{}
-				enc["obsStatus"] = "unavailable"
+				enc["obsStatus"] = obsStatusUnavailable
 				enc["obsError"] = err.Error()
 				mu.Lock()
 				partial = true
 				mu.Unlock()
 				return
 			}
-			enc["obs"] = asSlice(obsData["results"])
-			enc["obsStatus"] = "ok"
+			obs := asSlice(obsData["results"])
+			enc["obs"] = obs
+			if restPageCapped(obsData, obs, obsPerEncounterLimit) {
+				enc["obsStatus"] = obsStatusPartial
+				mu.Lock()
+				partial = true
+				truncated = true
+				mu.Unlock()
+				return
+			}
+			enc["obsStatus"] = obsStatusOK
 		}(enc)
 	}
 	wg.Wait()
@@ -455,7 +484,65 @@ func encountersSection(c *client.Client, uuid string) *section {
 		status = statusNone
 		encs = []any{}
 	}
-	return &section{Status: status, Source: "rest", Items: encs, Partial: partial}
+	s := &section{Status: status, Source: "rest", Items: encs, Partial: partial || truncated, Truncated: truncated}
+	return s
+}
+
+// sectionFromItems builds a successful section. Empty after filters is
+// status none; a hit fetch cap always sets Partial+Truncated even when
+// the filtered list is empty (none does not mean "complete empty chart").
+func sectionFromItems(source string, items []any, capped bool) *section {
+	if items == nil {
+		items = []any{}
+	}
+	status := statusOK
+	if len(items) == 0 {
+		status = statusNone
+	}
+	return &section{
+		Status:    status,
+		Source:    source,
+		Items:     items,
+		Partial:   capped,
+		Truncated: capped,
+	}
+}
+
+// fhirBundleCapped is true when the response filled _count or advertises
+// a next page — either means we may not have seen the full resource set.
+func fhirBundleCapped(bundle map[string]any, entries []any, count int) bool {
+	if len(entries) >= count {
+		return true
+	}
+	for _, l := range asSlice(bundle["link"]) {
+		lm, _ := l.(map[string]any)
+		rel, _ := lm["relation"].(string)
+		if rel == "" {
+			rel, _ = lm["rel"].(string)
+		}
+		if strings.EqualFold(rel, "next") {
+			return true
+		}
+	}
+	return false
+}
+
+// restPageCapped is true when the page filled limit, the client marked
+// truncated, or a next link is present.
+func restPageCapped(page map[string]any, results []any, limit int) bool {
+	if page["truncated"] == true {
+		return true
+	}
+	if len(results) >= limit {
+		return true
+	}
+	for _, l := range asSlice(page["links"]) {
+		lm, _ := l.(map[string]any)
+		if lm["rel"] == "next" {
+			return true
+		}
+	}
+	return false
 }
 
 func asSlice(v any) []any {
@@ -492,6 +579,11 @@ func renderSummary(patient map[string]any, sections map[string]*section) {
 			return
 		}
 		fmt.Printf("\n%s\n", title)
+		if s.Truncated {
+			fmt.Println("  (partial — results may be incomplete; fetch cap reached)")
+		} else if s.Partial {
+			fmt.Println("  (partial — one or more nested fetches failed)")
+		}
 		switch s.Status {
 		case statusUnavailable:
 			fmt.Printf("  (unavailable: %s)\n", s.Error)
@@ -510,9 +602,12 @@ func renderSummary(patient map[string]any, sections map[string]*section) {
 				rec, _ := item.(map[string]any)
 				fmt.Printf("  • %s\n", line(rec))
 				if name == "encounters" {
-					if rec["obsStatus"] == "unavailable" {
+					switch rec["obsStatus"] {
+					case obsStatusUnavailable:
 						fmt.Println("      (observations unavailable — fetch failed)")
 						continue
+					case obsStatusPartial:
+						fmt.Println("      (observations partial — fetch cap reached)")
 					}
 					for _, o := range asSlice(rec["obs"]) {
 						ob, _ := o.(map[string]any)

@@ -73,10 +73,17 @@ value set:
   | `withheld` | the server denied access (HTTP 403) |
 
 Treat `none` as "nobody ever asked", never as proof of absence... only
-`confirmed-none` asserts absence. A section may also carry
-`partial: true`, meaning a nested fetch failed; the affected item is
-marked, e.g. `obsStatus: "unavailable"` on one encounter. UUIDs are
-preserved on every item for follow-up queries.
+`confirmed-none` asserts absence. Treat `ok` / `none` as a *complete*
+view of that section only when both `partial` and `truncated` are
+absent (or false).
+
+- `partial: true` — section is incomplete (nested failure and/or cap).
+- `truncated: true` — a hard fetch cap may have dropped rows (also sets
+  `partial`). Same idea as `"truncated": true` on capped `--all` lists.
+- Nested markers: `obsStatus` is `ok`, `unavailable` (fetch failed), or
+  `partial` (obs page filled its limit).
+
+UUIDs are preserved on every item for follow-up queries.
 
 One honest limit worth knowing: a server that silently filters rows for
 privacy reasons is invisible to any client vocabulary. `withheld` only
