@@ -97,11 +97,15 @@ Every other REST resource is reachable through the escape hatch:
 omrs get <path> --param k=v --param k2=v2
 ```
 
+`omrs get patient/<uuid>` (exactly `resource/<uuid>`) is a single-record
+fetch and does not apply list `--limit`. Collection paths still honor
+`--limit` / `--all`.
+
 Useful flags everywhere: `--fields uuid,display,person.age` (server-side
 field selection), `--limit N`, `--all` (follows pagination, capped 5000),
 `--since`/`--until` on encounter/visit/obs lists (accepts `2026-01-01`,
 `7d`, `today`, `yesterday`). Note: obs date filtering is client-side, so
-pair it with `--all`.
+pair it with `--all`. Ctrl-C cancels in-flight HTTP (command context).
 
 A public sandbox exists at `https://dev3.openmrs.org/openmrs`
 (admin / Admin123). `omrs login --demo` is the one-command on-ramp: it

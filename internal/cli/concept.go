@@ -29,7 +29,7 @@ var conceptSearchCmd = &cobra.Command{
 		if conceptSource != "" {
 			params.Set("source", conceptSource)
 		}
-		return fetchList("concept", params, "concept")
+		return fetchList(cmd.Context(), "concept", params, "concept")
 	},
 }
 

@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/pbiondich/openmrs-cli/internal/config"
 )
@@ -256,5 +258,73 @@ func TestGetQueryParams(t *testing.T) {
 	}
 	if got.Get("q") != "john" || got.Get("limit") != "5" {
 		t.Fatalf("query=%v", got)
+	}
+}
+
+func TestDoCanceledContext(t *testing.T) {
+	started := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		time.Sleep(2 * time.Second)
+		_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}})
+	}))
+	t.Cleanup(srv.Close)
+
+	// No client timeout so cancel is what stops the wait.
+	c := NewWithHTTP(config.Resolved{URL: srv.URL}, &http.Client{})
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-started
+		cancel()
+	}()
+	_, err := c.GetContext(ctx, "slow", nil)
+	if err == nil {
+		t.Fatal("expected cancel error")
+	}
+	var api *APIError
+	if !asAPI(err, &api) || api.Code != CodeUnknown {
+		t.Fatalf("err=%v", err)
+	}
+	if !strings.Contains(err.Error(), "cancel") {
+		t.Fatalf("message=%q", err.Error())
+	}
+}
+
+func TestWithContextPropagates(t *testing.T) {
+	var sawCancel atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+		sawCancel.Store(true)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewWithHTTP(config.Resolved{URL: srv.URL}, &http.Client{})
+	ctx, cancel := context.WithCancel(context.Background())
+	c = c.WithContext(ctx)
+	cancel()
+	_, err := c.Get("x", nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestDoPOSTMethod(t *testing.T) {
+	var method string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method = r.Method
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	t.Cleanup(srv.Close)
+
+	c := New(config.Resolved{URL: srv.URL})
+	out, err := c.Do(context.Background(), http.MethodPost, srv.URL+"/ws/rest/v1/x", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if method != http.MethodPost {
+		t.Fatalf("method=%s", method)
+	}
+	if out["ok"] != true {
+		t.Fatalf("%v", out)
 	}
 }

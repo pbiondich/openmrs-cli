@@ -14,7 +14,7 @@ var pingCmd = &cobra.Command{
 	Use:   "ping",
 	Short: "Check connectivity to the OpenMRS server",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		c, err := newClient()
+		c, err := newClient(cmd.Context())
 		if err != nil {
 			return err
 		}
@@ -43,7 +43,7 @@ var sessionCmd = &cobra.Command{
 	Use:   "session",
 	Short: "Show authentication status and current user",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		c, err := newClient()
+		c, err := newClient(cmd.Context())
 		if err != nil {
 			return err
 		}

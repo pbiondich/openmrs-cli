@@ -28,7 +28,7 @@ var patientSearchCmd = &cobra.Command{
 		} else {
 			params.Set("q", args[0])
 		}
-		return fetchList("patient", params, "patient")
+		return fetchList(cmd.Context(), "patient", params, "patient")
 	},
 }
 

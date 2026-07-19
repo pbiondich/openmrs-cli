@@ -44,7 +44,7 @@ var encounterListCmd = &cobra.Command{
 			params.Set("todate", s)
 		}
 		warnIfNoFilter(params, "--patient <uuid>")
-		return fetchList("encounter", params, "encounter")
+		return fetchList(cmd.Context(), "encounter", params, "encounter")
 	},
 }
 

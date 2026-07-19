@@ -15,8 +15,8 @@ var visitCmd = &cobra.Command{
 }
 
 var visitListCmd = &cobra.Command{
-	Use:     "list",
-	Short:   "List visits",
+	Use:   "list",
+	Short: "List visits",
 	Example: `  omrs visit list --patient <uuid>
   omrs visit list --patient <uuid> --since 6m`,
 	Args: cobra.NoArgs,
@@ -39,7 +39,7 @@ var visitListCmd = &cobra.Command{
 			}
 			params.Set("toStartDate", s)
 		}
-		return fetchList("visit", params, "visit")
+		return fetchList(cmd.Context(), "visit", params, "visit")
 	},
 }
 

@@ -228,7 +228,7 @@ var whoamiCmd = &cobra.Command{
 	Short: "Show the authenticated user (fails with exit 2 if not authenticated)",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		c, err := newClient()
+		c, err := newClient(cmd.Context())
 		if err != nil {
 			return err
 		}

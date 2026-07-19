@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -10,16 +11,23 @@ import (
 
 var getParams []string
 
+// instanceUUIDRe matches a single path segment that looks like a UUID.
+var instanceUUIDRe = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
 var genericGetCmd = &cobra.Command{
 	Use:   "get <path>",
 	Short: "GET any REST resource path (generic escape hatch)",
 	Long: `GET an arbitrary path under /ws/rest/v1/ — every OpenMRS REST resource
 is reachable this way, including ones without a dedicated subcommand.
 
-Query parameters can be given inline or with repeatable --param flags.`,
+Query parameters can be given inline or with repeatable --param flags.
+
+A path of the form <resource>/<uuid> is fetched as a single record (no
+list limit). Collection paths honor --limit / --all.`,
 	Example: `  omrs get visittype
   omrs get encountertype --json
   omrs get program --limit 50
+  omrs get patient/<uuid>
   omrs get patient/<uuid>/encounter
   omrs get "patient?q=john"
   omrs get obs --param patient=<uuid> --param concept=<uuid>`,
@@ -49,11 +57,25 @@ Query parameters can be given inline or with repeatable --param flags.`,
 			params.Add(k, v)
 		}
 
-		// Single-resource paths (with a UUID segment) print as a record;
-		// collection paths honor limit/--all and print as a list.
 		resource := strings.SplitN(path, "/", 2)[0]
-		return fetchList(path, params, resource)
+		if isInstancePath(path) {
+			// Merge representation flags only; do not force limit.
+			return fetchOne(cmd.Context(), path, resource)
+		}
+		return fetchList(cmd.Context(), path, params, resource)
 	},
+}
+
+// isInstancePath reports paths of the form resource/<uuid> (exactly two
+// segments, second a UUID). Nested lists like patient/<uuid>/encounter
+// stay collection fetches.
+func isInstancePath(path string) bool {
+	path = strings.Trim(path, "/")
+	if path == "" {
+		return false
+	}
+	parts := strings.Split(path, "/")
+	return len(parts) == 2 && instanceUUIDRe.MatchString(parts[1])
 }
 
 func init() {

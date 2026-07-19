@@ -15,17 +15,17 @@ var locationCmd = &cobra.Command{
 }
 
 var locationListCmd = &cobra.Command{
-	Use:     "list",
-	Short:   "List locations",
+	Use:   "list",
+	Short: "List locations",
 	Example: `  omrs location list
   omrs location list --tag "Login Location"`,
-	Args:    cobra.NoArgs,
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		params := url.Values{}
 		if locationTag != "" {
 			params.Set("tag", locationTag)
 		}
-		return fetchList("location", params, "location")
+		return fetchList(cmd.Context(), "location", params, "location")
 	},
 }
 

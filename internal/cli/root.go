@@ -2,12 +2,15 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
+	"os/signal"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -78,8 +81,11 @@ func init() {
 }
 
 // Execute runs the CLI and returns the process exit code.
+// SIGINT/SIGTERM cancel the command context so in-flight HTTP stops.
 func Execute() int {
-	if err := rootCmd.Execute(); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := rootCmd.ExecuteContext(ctx); err != nil {
 		// flags.jsonOut is unset when flag parsing itself failed, so also
 		// honor a literal --json on the command line.
 		return output.PrintError(err, flags.jsonOut || slices.Contains(os.Args[1:], "--json"))
@@ -115,7 +121,8 @@ func groupRunE(cmd *cobra.Command, args []string) error {
 // newClient resolves connection settings and builds an API client.
 // Passwords come from the profile credential store, config file, or
 // OMRS_PASSWORD — never from a -p command-line flag.
-func newClient() (*client.Client, error) {
+// When ctx is non-nil, requests use that context (cancel on Ctrl-C).
+func newClient(ctx context.Context) (*client.Client, error) {
 	res, err := config.Resolve(config.Overrides{
 		Server:  flags.server,
 		User:    flags.user,
@@ -124,7 +131,11 @@ func newClient() (*client.Client, error) {
 	if err != nil {
 		return nil, wrapResolveError(err)
 	}
-	return client.New(res), nil
+	c := client.New(res)
+	if ctx != nil {
+		c = c.WithContext(ctx)
+	}
+	return c, nil
 }
 
 // representation maps --full/--ref/--fields to the v= query parameter.
@@ -150,8 +161,8 @@ func outputMode() output.Mode {
 }
 
 // fetchListData performs a list/search query honoring limit/start/--all.
-func fetchListData(path string, params url.Values) (map[string]any, error) {
-	c, err := newClient()
+func fetchListData(ctx context.Context, path string, params url.Values) (map[string]any, error) {
+	c, err := newClient(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -168,17 +179,17 @@ func fetchListData(path string, params url.Values) (map[string]any, error) {
 }
 
 // fetchList fetches and prints a list/search query.
-func fetchList(path string, params url.Values, resource string) error {
-	data, err := fetchListData(path, params)
+func fetchList(ctx context.Context, path string, params url.Values, resource string) error {
+	data, err := fetchListData(ctx, path, params)
 	if err != nil {
 		return err
 	}
 	return output.Print(data, outputMode(), resource)
 }
 
-// fetchOne gets a single resource by path and prints it.
-func fetchOne(path, resource string) error {
-	c, err := newClient()
+// fetchOne gets a single resource by path and prints it (no list limit).
+func fetchOne(ctx context.Context, path, resource string) error {
+	c, err := newClient(ctx)
 	if err != nil {
 		return err
 	}
@@ -198,7 +209,7 @@ func getCmd(resource, apiPath string) *cobra.Command {
 		Short: fmt.Sprintf("Get a %s by UUID", resource),
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return fetchOne(apiPath+"/"+args[0], resource)
+			return fetchOne(cmd.Context(), apiPath+"/"+args[0], resource)
 		},
 	}
 }

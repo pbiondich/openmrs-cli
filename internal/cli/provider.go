@@ -23,7 +23,7 @@ var providerListCmd = &cobra.Command{
 		if providerQuery != "" {
 			params.Set("q", providerQuery)
 		}
-		return fetchList("provider", params, "provider")
+		return fetchList(cmd.Context(), "provider", params, "provider")
 	},
 }
 

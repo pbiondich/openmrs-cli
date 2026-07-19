@@ -94,7 +94,7 @@ func TestResolvePatientIdentifierNotInFuzzyTopPage(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"results": []any{
 					map[string]any{
-						"uuid": "rare",
+						"uuid":    "rare",
 						"display": "Rare Patient",
 						"identifiers": []any{
 							map[string]any{"identifier": "RARE-MRN-99"},

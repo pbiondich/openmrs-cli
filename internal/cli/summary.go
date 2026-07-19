@@ -116,7 +116,7 @@ rendering.`,
 }
 
 func runPatientSummary(cmd *cobra.Command, args []string) error {
-	c, err := newClient()
+	c, err := newClient(cmd.Context())
 	if err != nil {
 		return err
 	}

@@ -2,6 +2,7 @@
 package client
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,6 +31,8 @@ const (
 // (e.g. empty pages with a sticky next link).
 const MaxPages = 500
 
+const defaultTimeout = 30 * time.Second
+
 func ExitCode(code string) int {
 	switch code {
 	case CodeAuth:
@@ -57,63 +60,84 @@ type APIError struct {
 
 func (e *APIError) Error() string { return e.Message }
 
+// Client talks to an OpenMRS REST (and optional FHIR2) endpoint.
+// Safe for concurrent use with a shared request context (see WithContext).
 type Client struct {
 	baseURL string // e.g. https://dev3.openmrs.org/openmrs (no trailing slash)
 	user    string
 	pass    string
 	http    *http.Client
+	// ctx is used by Get/GetFHIR/GetAll when non-nil; otherwise Background.
+	ctx context.Context
 }
 
+// New builds a client with a default 30s per-request timeout.
 func New(r config.Resolved) *Client {
+	return NewWithHTTP(r, &http.Client{Timeout: defaultTimeout})
+}
+
+// NewWithHTTP builds a client with a custom HTTP client (tests, custom transport).
+func NewWithHTTP(r config.Resolved, hc *http.Client) *Client {
+	if hc == nil {
+		hc = &http.Client{Timeout: defaultTimeout}
+	}
 	return &Client{
 		baseURL: strings.TrimRight(r.URL, "/"),
 		user:    r.User,
 		pass:    r.Password,
-		http:    &http.Client{Timeout: 30 * time.Second},
+		http:    hc,
 	}
+}
+
+// WithContext returns a shallow copy that uses ctx for subsequent requests.
+// Cancel ctx to abort in-flight and follow-on GETs (e.g. summary fan-out).
+func (c *Client) WithContext(ctx context.Context) *Client {
+	if c == nil {
+		return nil
+	}
+	cp := *c
+	cp.ctx = ctx
+	return &cp
 }
 
 func (c *Client) BaseURL() string { return c.baseURL }
 
-// Get performs a GET against /ws/rest/v1/<path> and decodes the JSON response.
-func (c *Client) Get(path string, params url.Values) (map[string]any, error) {
-	u := c.baseURL + "/ws/rest/v1/" + strings.TrimLeft(path, "/")
-	if len(params) > 0 {
-		u += "?" + params.Encode()
+func (c *Client) requestContext() context.Context {
+	if c != nil && c.ctx != nil {
+		return c.ctx
 	}
-	return c.getURL(u)
+	return context.Background()
 }
 
-// GetFHIR performs a GET against the FHIR2 module's R4 endpoint. An
-// OperationOutcome response is surfaced as an error so callers can fall
-// back to the REST API.
-func (c *Client) GetFHIR(path string, params url.Values) (map[string]any, error) {
-	u := c.baseURL + "/ws/fhir2/R4/" + strings.TrimLeft(path, "/")
-	if len(params) > 0 {
-		u += "?" + params.Encode()
+// Do performs an HTTP request against a full URL and decodes JSON.
+// method is e.g. http.MethodGet. body may be nil.
+// This is the single transport path all GET helpers use; future write
+// helpers should call Do rather than inventing a second stack.
+func (c *Client) Do(ctx context.Context, method, rawURL string, body io.Reader) (map[string]any, error) {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	out, err := c.getURL(u)
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, body)
 	if err != nil {
-		return nil, err
-	}
-	if out["resourceType"] == "OperationOutcome" {
-		return nil, &APIError{Message: "FHIR server returned an OperationOutcome error", Code: CodeUnknown}
-	}
-	return out, nil
-}
-
-func (c *Client) getURL(u string) (map[string]any, error) {
-	req, err := http.NewRequest(http.MethodGet, u, nil)
-	if err != nil {
-		return nil, &APIError{Message: fmt.Sprintf("invalid request URL %s: %v", u, err), Code: CodeBadRequest}
+		return nil, &APIError{Message: fmt.Sprintf("invalid request URL %s: %v", rawURL, err), Code: CodeBadRequest}
 	}
 	if c.user != "" || c.pass != "" {
 		req.SetBasicAuth(c.user, c.pass)
 	}
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "omrs")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil, &APIError{Message: "request canceled", Code: CodeUnknown}
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, &APIError{Message: fmt.Sprintf("request to %s timed out", c.baseURL), Code: CodeConnection}
+		}
 		msg := fmt.Sprintf("connection to %s failed: %v", c.baseURL, err)
 		var uerr *url.Error
 		if errors.As(err, &uerr) && uerr.Timeout() {
@@ -123,29 +147,66 @@ func (c *Client) getURL(u string) (map[string]any, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if err != nil {
 		return nil, &APIError{Message: fmt.Sprintf("reading response: %v", err), Code: CodeConnection}
 	}
 
 	if resp.StatusCode >= 400 {
-		return nil, apiErrorFromResponse(resp.StatusCode, body)
+		return nil, apiErrorFromResponse(resp.StatusCode, respBody)
 	}
 
 	// 204 No Content (and empty bodies generally) mean "success, nothing
 	// to return" — e.g. a patient with no recorded allergies. Render as
 	// an empty result set rather than a parse failure.
-	if resp.StatusCode == http.StatusNoContent || len(strings.TrimSpace(string(body))) == 0 {
+	if resp.StatusCode == http.StatusNoContent || len(strings.TrimSpace(string(respBody))) == 0 {
 		return map[string]any{"results": []any{}}, nil
 	}
 
 	var out map[string]any
-	if err := json.Unmarshal(body, &out); err != nil {
+	if err := json.Unmarshal(respBody, &out); err != nil {
 		return nil, &APIError{
 			Message:    fmt.Sprintf("server returned non-JSON response (HTTP %d) — is %s an OpenMRS server?", resp.StatusCode, c.baseURL),
 			Code:       CodeUnknown,
 			HTTPStatus: resp.StatusCode,
 		}
+	}
+	return out, nil
+}
+
+// Get performs a GET against /ws/rest/v1/<path> and decodes the JSON response.
+func (c *Client) Get(path string, params url.Values) (map[string]any, error) {
+	return c.GetContext(c.requestContext(), path, params)
+}
+
+// GetContext is Get with an explicit context.
+func (c *Client) GetContext(ctx context.Context, path string, params url.Values) (map[string]any, error) {
+	u := c.baseURL + "/ws/rest/v1/" + strings.TrimLeft(path, "/")
+	if len(params) > 0 {
+		u += "?" + params.Encode()
+	}
+	return c.Do(ctx, http.MethodGet, u, nil)
+}
+
+// GetFHIR performs a GET against the FHIR2 module's R4 endpoint. An
+// OperationOutcome response is surfaced as an error so callers can fall
+// back to the REST API.
+func (c *Client) GetFHIR(path string, params url.Values) (map[string]any, error) {
+	return c.GetFHIRContext(c.requestContext(), path, params)
+}
+
+// GetFHIRContext is GetFHIR with an explicit context.
+func (c *Client) GetFHIRContext(ctx context.Context, path string, params url.Values) (map[string]any, error) {
+	u := c.baseURL + "/ws/fhir2/R4/" + strings.TrimLeft(path, "/")
+	if len(params) > 0 {
+		u += "?" + params.Encode()
+	}
+	out, err := c.Do(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	if out["resourceType"] == "OperationOutcome" {
+		return nil, &APIError{Message: "FHIR server returned an OperationOutcome error", Code: CodeUnknown}
 	}
 	return out, nil
 }
@@ -189,15 +250,12 @@ func firstLine(s string) string {
 }
 
 // GetAll follows links[rel=next] pagination, accumulating results up to cap.
-// Returns {"results": [...]} in the same shape as a single page. A capped
-// fetch sets "truncated": true in the payload — stdout must carry the
-// incompleteness signal, not just stderr — and totalCount is passed
-// through when the server sent one.
-//
-// Next-link URIs are restricted to the same scheme and host as the
-// configured base URL so a malicious or misconfigured page cannot exfiltrate
-// Basic Auth credentials. Empty pages and a hard page cap stop infinite loops.
 func (c *Client) GetAll(path string, params url.Values, capItems int) (map[string]any, error) {
+	return c.GetAllContext(c.requestContext(), path, params, capItems)
+}
+
+// GetAllContext is GetAll with an explicit context (checked between pages).
+func (c *Client) GetAllContext(ctx context.Context, path string, params url.Values, capItems int) (map[string]any, error) {
 	u := c.baseURL + "/ws/rest/v1/" + strings.TrimLeft(path, "/")
 	if len(params) > 0 {
 		u += "?" + params.Encode()
@@ -207,6 +265,12 @@ func (c *Client) GetAll(path string, params url.Values, capItems int) (map[strin
 	truncated := false
 	var totalCount any
 	for pageNum := 0; u != ""; pageNum++ {
+		if err := ctx.Err(); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return nil, &APIError{Message: "request canceled", Code: CodeUnknown}
+			}
+			return nil, &APIError{Message: fmt.Sprintf("request to %s timed out", c.baseURL), Code: CodeConnection}
+		}
 		if pageNum >= MaxPages {
 			truncated = true
 			warn, _ := json.Marshal(map[string]string{
@@ -216,13 +280,12 @@ func (c *Client) GetAll(path string, params url.Values, capItems int) (map[strin
 			break
 		}
 
-		page, err := c.getURL(u)
+		page, err := c.Do(ctx, http.MethodGet, u, nil)
 		if err != nil {
 			return nil, err
 		}
 		results, _ := page["results"].([]any)
 		if len(results) == 0 {
-			// Sticky next links with empty pages would loop forever.
 			break
 		}
 		all = append(all, results...)

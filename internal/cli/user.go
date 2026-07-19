@@ -23,7 +23,7 @@ var userListCmd = &cobra.Command{
 		if userQuery != "" {
 			params.Set("q", userQuery)
 		}
-		return fetchList("user", params, "user")
+		return fetchList(cmd.Context(), "user", params, "user")
 	},
 }
 

@@ -52,7 +52,7 @@ var obsListCmd = &cobra.Command{
 			}
 		}
 
-		data, err := fetchListData("obs", params)
+		data, err := fetchListData(cmd.Context(), "obs", params)
 		if err != nil {
 			return err
 		}
