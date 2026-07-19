@@ -153,9 +153,7 @@ func runPatientSummary(cmd *cobra.Command, args []string) error {
 	run("visit", func() *section {
 		return restSection(c, "visit", url.Values{"patient": {uuid}, "includeInactive": {"false"}, "v": {"default"}}, "rest")
 	})
-	run("problems", func() *section {
-		return restSection(c, "condition", url.Values{"patientUuid": {uuid}, "v": {"default"}}, "rest")
-	})
+	run("problems", func() *section { return problemsSection(c, uuid) })
 	run("allergies", func() *section { return allergiesSection(c, uuid) })
 	run("programs", func() *section {
 		return restSection(c, "programenrollment", url.Values{"patient": {uuid}, "v": {"default"}}, "rest")
@@ -166,11 +164,12 @@ func runPatientSummary(cmd *cobra.Command, args []string) error {
 
 	wg.Wait()
 
-	// counts gives a reader (human or agent) the shape of the record
-	// before the bulk of the payload — it marshals first alphabetically.
-	counts := map[string]int{}
+	// counts gives a reader the shape of successful sections. Failed
+	// sections are null (not 0) so agents never confuse "fetch failed"
+	// with "nothing recorded".
+	counts := map[string]any{}
 	for name, s := range sections {
-		counts[name] = len(s.Items)
+		counts[name] = sectionCount(s)
 	}
 	result := map[string]any{
 		"counts":   counts,
@@ -317,6 +316,48 @@ func restSection(c *client.Client, path string, params url.Values, source string
 		items = []any{}
 	}
 	return &section{Status: status, Source: source, Items: items}
+}
+
+// problemsSection lists active conditions only. Inactive / history-of
+// rows are not "current problems" and must not pad the problem list.
+func problemsSection(c *client.Client, uuid string) *section {
+	data, err := c.Get("condition", url.Values{"patientUuid": {uuid}, "v": {"default"}})
+	if err != nil {
+		return &section{Status: statusForError(err), Source: "rest", Items: []any{}, Error: err.Error()}
+	}
+	var active []any
+	for _, r := range asSlice(data["results"]) {
+		rec, _ := r.(map[string]any)
+		if conditionIsActive(rec) {
+			active = append(active, rec)
+		}
+	}
+	return sectionFromItems("rest", active, false)
+}
+
+// conditionIsActive reports whether a Condition looks current. OpenMRS
+// clinicalStatus is typically ACTIVE / INACTIVE / HISTORY_OF.
+func conditionIsActive(rec map[string]any) bool {
+	st := strings.ToUpper(strings.TrimSpace(output.Extract(rec, "clinicalStatus")))
+	// Missing status: keep the row (safer than dropping unknowns silently).
+	if st == "" {
+		return true
+	}
+	return st == "ACTIVE"
+}
+
+// sectionCount is the item length for ok/none/confirmed-none sections,
+// or nil when the section failed so counts never look like empty data.
+func sectionCount(s *section) any {
+	if s == nil {
+		return nil
+	}
+	switch s.Status {
+	case statusUnavailable, statusWithheld:
+		return nil
+	default:
+		return len(s.Items)
+	}
 }
 
 // allergiesSection is the one place a true confident-negative exists:

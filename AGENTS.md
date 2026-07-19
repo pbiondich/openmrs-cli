@@ -55,8 +55,10 @@ yourself: it fans out REST and FHIR queries in parallel and returns
 IPS-aligned sections. Resolution order is UUID, then exact identifier=
 lookup, then fuzzy name search; an ambiguous reference errors with the
 candidates listed. Read the top-level `counts`
-object first: it gives every section's item count up front, so you know
-the record's shape before (and regardless of how far) you read the rest.
+object first: it gives every section's item count up front when the
+section succeeded. Failed sections (`unavailable` / `withheld`) use
+`null`, not `0`, so a failed fetch is never mistaken for "nothing
+recorded."
 Each section reports `status` and `source`. The status vocabulary
 follows a six-state absence model, cross-checked against FHIR's
 [`Composition.section.emptyReason`](https://hl7.org/fhir/R4/valueset-list-empty-reason.html)
