@@ -147,6 +147,7 @@ func Resolve(o Overrides) (Resolved, error) {
 	// Track whether the profile expected a keychain entry so a missing
 	// secret can hard-fail after flag/env overrides are considered.
 	keychainProfile := ""
+	var keychainReadErr error
 	if profileName != "" {
 		p, ok := cfg.Profiles[profileName]
 		if !ok {
@@ -171,8 +172,10 @@ func Resolve(o Overrides) (Resolved, error) {
 				case errors.Is(err, secrets.ErrNotFound):
 					// Leave empty; hard-fail below if still unset after overrides.
 				default:
-					return Resolved{}, fmt.Errorf("%w: read failed for profile %q: %v (run 'omrs login')",
-						ErrCredentialStore, profileName, err)
+					// Store unavailable (common on headless Linux CI with no
+					// Secret Service). Do not abort yet — OMRS_PASSWORD or
+					// flags may still supply credentials.
+					keychainReadErr = err
 				}
 			} else if p.Password != "" {
 				res.Password = p.Password
@@ -203,6 +206,10 @@ func Resolve(o Overrides) (Resolved, error) {
 	// Profile said keychain but we still have no password after all
 	// overrides — fail loudly so agents do not issue anonymous requests.
 	if keychainProfile != "" && res.Password == "" {
+		if keychainReadErr != nil {
+			return Resolved{}, fmt.Errorf("%w: credential store unavailable for profile %q: %v; set OMRS_PASSWORD or run 'omrs login' where a keyring is available",
+				ErrCredentialStore, keychainProfile, keychainReadErr)
+		}
 		return Resolved{}, fmt.Errorf("%w: profile %q expects a credential-store entry but none was found; run 'omrs login' or set OMRS_PASSWORD",
 			ErrCredentialStore, keychainProfile)
 	}

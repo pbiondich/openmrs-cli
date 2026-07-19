@@ -80,6 +80,8 @@ func TestResolveMissingExplicitProfile(t *testing.T) {
 
 func TestResolveKeychainMissingHardFails(t *testing.T) {
 	// Use a profile name that almost certainly has no keychain entry.
+	// On headless Linux (CI) the store may be unavailable rather than
+	// "not found"; both paths must hard-fail without a password override.
 	name := "omrs-test-no-such-keychain-entry-xyz"
 	withTempConfig(t, &Config{
 		DefaultProfile: name,
@@ -96,7 +98,8 @@ func TestResolveKeychainMissingHardFails(t *testing.T) {
 		t.Fatalf("err=%v want ErrCredentialStore", err)
 	}
 
-	// Env password satisfies the requirement without keychain.
+	// Env password must work even when the keyring is missing or down
+	// (GitHub Actions has no org.freedesktop.secrets).
 	t.Setenv("OMRS_PASSWORD", "env-secret")
 	res, err := Resolve(Overrides{})
 	if err != nil {
