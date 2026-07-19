@@ -80,7 +80,7 @@ The CLI's output is yours to control: `--full`, `--ref`, or `--fields uuid,displ
 
 ## Authentication
 
-`omrs login --demo` is the labeled public-sandbox exception: well-known credentials on [dev3.openmrs.org](https://dev3.openmrs.org/openmrs), saved under the `demo` profile (and made your default). That server resets periodically... never put anything you care about there.
+If you want to test the CLI against the OpenMRS community demo site, just use `omrs login --demo`. It uses the well known credential for the [dev3.openmrs.org](https://dev3.openmrs.org/openmrs) server.
 
 For everything else, `omrs login -s <url> -u <user>` prompts for a password (hidden), checks it against the server *before* saving, and stores it in the OS credential store (Keychain / Credential Manager / Secret Service)... with a config-file fallback only when there's no keyring. `omrs logout` clears the stored secret. `omrs whoami` is the hard check (exit 2 if you're not authenticated).
 
@@ -91,8 +91,6 @@ echo "$OMRS_PW" | omrs login -s http://localhost/openmrs -u admin --password-std
 # one-shot without saving a profile:
 #   OMRS_SERVER=... OMRS_USER=... OMRS_PASSWORD=... omrs whoami
 ```
-
-There is no `-p` flag on purpose. I don't want the easy path to teach leaving secrets on the process line or in a starter config file.
 
 ## For AI agents
 
