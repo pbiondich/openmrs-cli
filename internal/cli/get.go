@@ -60,7 +60,7 @@ list limit). Collection paths honor --limit / --all.`,
 		resource := strings.SplitN(path, "/", 2)[0]
 		if isInstancePath(path) {
 			// Merge representation flags only; do not force limit.
-			return fetchOne(cmd.Context(), path, resource)
+			return fetchOne(cmd.Context(), path, resource, params)
 		}
 		return fetchList(cmd.Context(), path, params, resource)
 	},

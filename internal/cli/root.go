@@ -160,13 +160,22 @@ func outputMode() output.Mode {
 	return output.Detect(flags.jsonOut, flags.tableOut)
 }
 
+// setRepresentation applies the v= parameter: explicit representation
+// flags always win, but an inline v= the user supplied (e.g.
+// `omrs get "concept?v=full"`) is preserved rather than overwritten.
+func setRepresentation(params url.Values) {
+	if flags.full || flags.ref || flags.fields != "" || !params.Has("v") {
+		params.Set("v", representation())
+	}
+}
+
 // fetchListData performs a list/search query honoring limit/start/--all.
 func fetchListData(ctx context.Context, path string, params url.Values) (map[string]any, error) {
 	c, err := newClient(ctx)
 	if err != nil {
 		return nil, err
 	}
-	params.Set("v", representation())
+	setRepresentation(params)
 
 	if flags.all {
 		return c.GetAll(path, params, PaginationCap)
@@ -188,13 +197,16 @@ func fetchList(ctx context.Context, path string, params url.Values, resource str
 }
 
 // fetchOne gets a single resource by path and prints it (no list limit).
-func fetchOne(ctx context.Context, path, resource string) error {
+// Caller-supplied params (inline query or --param) are passed through.
+func fetchOne(ctx context.Context, path, resource string, params url.Values) error {
 	c, err := newClient(ctx)
 	if err != nil {
 		return err
 	}
-	params := url.Values{}
-	params.Set("v", representation())
+	if params == nil {
+		params = url.Values{}
+	}
+	setRepresentation(params)
 	data, err := c.Get(path, params)
 	if err != nil {
 		return err
@@ -209,7 +221,7 @@ func getCmd(resource, apiPath string) *cobra.Command {
 		Short: fmt.Sprintf("Get a %s by UUID", resource),
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return fetchOne(cmd.Context(), apiPath+"/"+args[0], resource)
+			return fetchOne(cmd.Context(), apiPath+"/"+args[0], resource, nil)
 		},
 	}
 }

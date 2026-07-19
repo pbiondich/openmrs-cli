@@ -127,9 +127,31 @@ func runPatientSummary(cmd *cobra.Command, args []string) error {
 	}
 	uuid, _ := patient["uuid"].(string)
 
+	// Unknown section names are a USAGE error, not a silent empty summary
+	// — a typo'd --sections must never masquerade as an empty chart.
+	validSections := map[string]bool{}
+	for _, v := range strings.Split(allSections, ",") {
+		validSections[v] = true
+	}
 	wanted := map[string]bool{}
 	for _, s := range strings.Split(summarySections, ",") {
-		wanted[strings.TrimSpace(s)] = true
+		name := strings.TrimSpace(s)
+		if name == "" {
+			continue
+		}
+		if !validSections[name] {
+			return &client.APIError{
+				Message: fmt.Sprintf("unknown section %q (valid sections: %s)", name, allSections),
+				Code:    client.CodeUsage,
+			}
+		}
+		wanted[name] = true
+	}
+	if len(wanted) == 0 {
+		return &client.APIError{
+			Message: fmt.Sprintf("no sections requested (valid sections: %s)", allSections),
+			Code:    client.CodeUsage,
+		}
 	}
 
 	sections := map[string]*section{}
@@ -211,14 +233,26 @@ func resolvePatient(c *client.Client, ref string) (map[string]any, error) {
 		return c.Get("patient/"+ref, url.Values{"v": {"full"}})
 	}
 
+	// OpenMRS identifier= search matches SUBSTRINGS on many versions
+	// (identifier=101 also returns 101-6, 1013TS-9, ...), so its results
+	// are candidates, not answers: only a structured exact-value match
+	// resolves. Partial-only hits fall through to the fuzzy stage and, if
+	// nothing better appears, are reported as ambiguity — never as a
+	// resolution and never as "not found" while candidates exist.
 	idData, err := c.Get("patient", url.Values{
 		"identifier": {ref}, "v": {"full"}, "limit": {"25"},
 	})
 	if err != nil {
 		return nil, err
 	}
-	if idResults := asSlice(idData["results"]); len(idResults) > 0 {
-		return choosePatient(ref, idResults, true)
+	idResults := asSlice(idData["results"])
+	switch exact := exactIdentifierMatches(ref, idResults); len(exact) {
+	case 0:
+		// fall through to fuzzy search
+	case 1:
+		return exact[0], nil
+	default:
+		return nil, ambiguityError(ref, toAnySlice(exact))
 	}
 
 	qData, err := c.Get("patient", url.Values{
@@ -227,31 +261,12 @@ func resolvePatient(c *client.Client, ref string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return choosePatient(ref, asSlice(qData["results"]), false)
+	return choosePatient(ref, asSlice(qData["results"]), idResults)
 }
 
-// choosePatient picks a single patient from a result page.
-// identifierSearch: the server already filtered by identifier=; any
-// multi-hit set is ambiguity. Fuzzy q=: prefer structured exact
-// identifier matches, then a unique single hit as a name convenience.
-func choosePatient(ref string, results []any, identifierSearch bool) (map[string]any, error) {
-	if len(results) == 0 {
-		return nil, &client.APIError{
-			Message: fmt.Sprintf("no patient found matching %q", ref),
-			Code:    client.CodeNotFound,
-		}
-	}
-
-	if identifierSearch {
-		if len(results) == 1 {
-			rec, _ := results[0].(map[string]any)
-			return rec, nil
-		}
-		return nil, ambiguityError(ref, results)
-	}
-
-	// Prefer exact identifier matches over fuzzy name hits, using the
-	// structured identifier value (not the display label).
+// exactIdentifierMatches filters a result page to patients carrying an
+// identifier whose structured value equals ref (case-insensitive).
+func exactIdentifierMatches(ref string, results []any) []map[string]any {
 	var matches []map[string]any
 	for _, r := range results {
 		rec, _ := r.(map[string]any)
@@ -264,31 +279,60 @@ func choosePatient(ref string, results []any, identifierSearch bool) (map[string
 			}
 		}
 	}
-	if len(matches) == 0 && len(results) == 1 {
-		rec, _ := results[0].(map[string]any)
-		matches = append(matches, rec)
+	return matches
+}
+
+func toAnySlice(recs []map[string]any) []any {
+	out := make([]any, len(recs))
+	for i, m := range recs {
+		out[i] = m
 	}
-	switch len(matches) {
-	case 0:
-		// Multiple fuzzy hits with no exact identifier match is
-		// ambiguity, not absence — report the candidates, never
-		// "not found" (which an agent reads as "patient doesn't exist").
-		if len(results) > 1 {
-			return nil, ambiguityError(ref, results)
+	return out
+}
+
+// choosePatient picks a single patient from a fuzzy q= result page.
+// Prefer structured exact identifier matches, then a unique single hit
+// as a name convenience. idCandidates are partial identifier= hits kept
+// for honest ambiguity reporting when the fuzzy page has nothing better.
+func choosePatient(ref string, results []any, idCandidates []any) (map[string]any, error) {
+	if len(results) == 0 {
+		if len(idCandidates) > 0 {
+			return nil, ambiguityError(ref, idCandidates)
 		}
 		return nil, &client.APIError{
 			Message: fmt.Sprintf("no patient found matching %q", ref),
 			Code:    client.CodeNotFound,
 		}
-	case 1:
-		return matches[0], nil
-	default:
-		recs := make([]any, len(matches))
-		for i, m := range matches {
-			recs[i] = m
-		}
-		return nil, ambiguityError(ref, recs)
 	}
+
+	if exact := exactIdentifierMatches(ref, results); len(exact) == 1 {
+		return exact[0], nil
+	} else if len(exact) > 1 {
+		return nil, ambiguityError(ref, toAnySlice(exact))
+	}
+
+	// No exact identifier match anywhere: a unique fuzzy hit (with no
+	// competing identifier candidates) is accepted as a name convenience.
+	if len(results) == 1 && len(idCandidates) == 0 {
+		rec, _ := results[0].(map[string]any)
+		return rec, nil
+	}
+
+	// Multiple fuzzy hits, or a single hit shadowed by partial identifier
+	// matches, is ambiguity, not absence — report the candidates, never
+	// "not found" (which an agent reads as "patient doesn't exist").
+	seen := map[string]bool{}
+	var cands []any
+	for _, r := range append(append([]any{}, results...), idCandidates...) {
+		rec, _ := r.(map[string]any)
+		u, _ := rec["uuid"].(string)
+		if u == "" || seen[u] {
+			continue
+		}
+		seen[u] = true
+		cands = append(cands, r)
+	}
+	return nil, ambiguityError(ref, cands)
 }
 
 func ambiguityError(ref string, candidates []any) *client.APIError {
