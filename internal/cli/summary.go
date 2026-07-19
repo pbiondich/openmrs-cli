@@ -58,7 +58,6 @@ const (
 	medsRESTLimit        = 100
 	vitalsFHIRCount      = 40
 	obsPerEncounterLimit = 100
-	encountersGetAllCap  = 2000
 )
 
 // statusForError maps a failed fetch to unavailable, or withheld when
@@ -509,32 +508,148 @@ func medsDisplay(res map[string]any) string {
 	return output.Extract(res, "medicationReference.display|medicationCodeableConcept.text|display")
 }
 
-// encountersSection fetches all encounters, keeps the most recent N, and
-// attaches each one's observations.
+// encountersSection loads only the most recent N encounters (default 5),
+// not the patient's full history. Prefers FHIR Encounter with _sort=-date;
+// falls back to a single REST page of size N (not GetAll up to thousands).
 func encountersSection(c *client.Client, uuid string) *section {
-	data, err := c.GetAll("encounter", url.Values{"patient": {uuid}, "v": {"default"}}, encountersGetAllCap)
-	if err != nil {
-		return &section{Status: statusForError(err), Source: "rest", Items: []any{}, Error: err.Error()}
+	n := summaryEncounters
+	if n < 1 {
+		n = 5
 	}
-	encs := asSlice(data["results"])
-	listTruncated := data["truncated"] == true
-	sort.SliceStable(encs, func(i, j int) bool {
-		a, _ := encs[i].(map[string]any)
-		b, _ := encs[j].(map[string]any)
+	encs, source, listTruncated, err := fetchRecentEncounters(c, uuid, n)
+	if err != nil {
+		return &section{Status: statusForError(err), Source: source, Items: []any{}, Error: err.Error()}
+	}
+
+	partial, truncated := attachEncounterObs(c, encs)
+	if listTruncated {
+		truncated = true
+		partial = true
+	}
+
+	status := statusOK
+	if len(encs) == 0 {
+		status = statusNone
+		encs = []any{}
+	}
+	return &section{
+		Status:    status,
+		Source:    source,
+		Items:     encs,
+		Partial:   partial,
+		Truncated: truncated,
+	}
+}
+
+// fetchRecentEncounters returns up to n encounters newest-first.
+func fetchRecentEncounters(c *client.Client, patientUUID string, n int) (encs []any, source string, truncated bool, err error) {
+	bundle, ferr := c.GetFHIR("Encounter", url.Values{
+		"patient": {patientUUID},
+		"_sort":   {"-date"},
+		"_count":  {fmt.Sprint(n)},
+	})
+	if ferr == nil {
+		entries := asSlice(bundle["entry"])
+		for _, e := range entries {
+			entry, _ := e.(map[string]any)
+			res, _ := entry["resource"].(map[string]any)
+			if enc := fhirEncounterToSummary(res); enc != nil {
+				encs = append(encs, enc)
+			}
+		}
+		if len(encs) > n {
+			encs = encs[:n]
+		}
+		return encs, "fhir", fhirBundleCapped(bundle, entries, n), nil
+	}
+
+	// REST: one page of size n, sort client-side. Without server sort we
+	// only know these are n encounters, not necessarily the global newest
+	// — if the page is full, mark truncated.
+	output.Warn("FHIR unavailable for encounters; falling back to REST (single page)")
+	data, rerr := c.Get("encounter", url.Values{
+		"patient": {patientUUID},
+		"v":       {"default"},
+		"limit":   {fmt.Sprint(n)},
+	})
+	if rerr != nil {
+		return nil, "rest", false, rerr
+	}
+	raw := asSlice(data["results"])
+	sort.SliceStable(raw, func(i, j int) bool {
+		a, _ := raw[i].(map[string]any)
+		b, _ := raw[j].(map[string]any)
 		da, _ := a["encounterDatetime"].(string)
 		db, _ := b["encounterDatetime"].(string)
 		return da > db
 	})
-	if len(encs) > summaryEncounters {
-		encs = encs[:summaryEncounters]
+	if len(raw) > n {
+		raw = raw[:n]
 	}
+	return raw, "rest", restPageCapped(data, asSlice(data["results"]), n), nil
+}
 
+// fhirEncounterToSummary maps a FHIR Encounter into the REST-like shape
+// the human renderer and obs attach path already expect.
+func fhirEncounterToSummary(res map[string]any) map[string]any {
+	if res == nil {
+		return nil
+	}
+	id := strings.TrimSpace(output.Extract(res, "id"))
+	if id == "" {
+		return nil
+	}
+	when := output.Extract(res, "period.start|period.end")
+	typeDisp := ""
+	for _, t := range asSlice(res["type"]) {
+		tm, _ := t.(map[string]any)
+		if d := strings.TrimSpace(output.Extract(tm, "text")); d != "" {
+			typeDisp = d
+			break
+		}
+		if d := codeableConceptDisplay(tm); d != "" {
+			typeDisp = d
+			break
+		}
+	}
+	locDisp := ""
+	for _, l := range asSlice(res["location"]) {
+		lm, _ := l.(map[string]any)
+		if d := strings.TrimSpace(output.Extract(lm, "location.display")); d != "" {
+			locDisp = d
+			break
+		}
+	}
+	return map[string]any{
+		"uuid":              id,
+		"encounterDatetime": when,
+		"encounterType":     map[string]any{"display": typeDisp},
+		"location":          map[string]any{"display": locDisp},
+	}
+}
+
+func codeableConceptDisplay(cc map[string]any) string {
+	if d := strings.TrimSpace(output.Extract(cc, "text")); d != "" {
+		return d
+	}
+	for _, c := range asSlice(cc["coding"]) {
+		cm, _ := c.(map[string]any)
+		if d := strings.TrimSpace(output.Extract(cm, "display")); d != "" {
+			return d
+		}
+	}
+	return ""
+}
+
+// attachEncounterObs loads observations for each encounter in parallel.
+func attachEncounterObs(c *client.Client, encs []any) (partial, truncated bool) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	partial := false
-	truncated := listTruncated
 	for _, e := range encs {
 		enc, _ := e.(map[string]any)
+		if enc == nil {
+			continue
+		}
 		wg.Add(1)
 		go func(enc map[string]any) {
 			defer wg.Done()
@@ -544,8 +659,6 @@ func encountersSection(c *client.Client, uuid string) *section {
 				"limit": {fmt.Sprint(obsPerEncounterLimit)},
 			})
 			if err != nil {
-				// A failed obs fetch must not masquerade as "no obs
-				// recorded" — mark it unavailable.
 				enc["obs"] = []any{}
 				enc["obsStatus"] = obsStatusUnavailable
 				enc["obsError"] = err.Error()
@@ -568,14 +681,7 @@ func encountersSection(c *client.Client, uuid string) *section {
 		}(enc)
 	}
 	wg.Wait()
-
-	status := statusOK
-	if len(encs) == 0 {
-		status = statusNone
-		encs = []any{}
-	}
-	s := &section{Status: status, Source: "rest", Items: encs, Partial: partial || truncated, Truncated: truncated}
-	return s
+	return partial, truncated
 }
 
 // sectionFromItems builds a successful section. Empty after filters is
