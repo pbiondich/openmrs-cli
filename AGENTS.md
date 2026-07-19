@@ -50,7 +50,10 @@ object first: it gives every section's item count up front, so you know
 the record's shape before (and regardless of how far) you read the rest.
 Each section reports `status` and `source`. The status vocabulary
 follows a six-state absence model, cross-checked against FHIR's
-`Composition.section.emptyReason`:
+[`Composition.section.emptyReason`](https://hl7.org/fhir/R4/valueset-list-empty-reason.html)
+codes and the related
+[`dataAbsentReason`](https://hl7.org/fhir/R4/valueset-data-absent-reason.html)
+value set:
 
   | status | meaning |
   |--------|---------|
