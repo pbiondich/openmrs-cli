@@ -77,9 +77,10 @@ var patientSummaryCmd = &cobra.Command{
 active visit, problems, medications, allergies, vitals, recent
 encounters with their observations, and program enrollments.
 
-The patient resolves from any identifier type the server knows (MRN,
-old ID, national ID, ...) on an exact value match, a UUID, or a unique
-name; an ambiguous reference errors with the candidates listed.
+The patient resolves from a UUID, an exact identifier match (OpenMRS
+identifier= lookup: MRN, old ID, national ID, ...), or a unique name via
+fuzzy search when no identifier hits; an ambiguous reference errors with
+the candidates listed.
 
 Sections follow the International Patient Summary (IPS) core where it
 applies. Medications and vitals prefer the FHIR2 module and fall back to
@@ -175,16 +176,60 @@ func runPatientSummary(cmd *cobra.Command, args []string) error {
 }
 
 // resolvePatient turns an MRN or UUID into a full patient record. An
-// ambiguous MRN is an error: a clinical summary must never guess.
+// ambiguous reference is an error: a clinical summary must never guess.
+//
+// Order: UUID direct get → REST identifier= (exact ID lookup) → fuzzy
+// q= (name / free text). Identifier-first matches patient search
+// --identifier and avoids false misses when the right patient is outside
+// the top page of a fuzzy search.
 func resolvePatient(c *client.Client, ref string) (map[string]any, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return nil, &client.APIError{Message: "empty patient reference", Code: client.CodeBadRequest}
+	}
 	if uuidRe.MatchString(ref) {
 		return c.Get("patient/"+ref, url.Values{"v": {"full"}})
 	}
-	data, err := c.Get("patient", url.Values{"q": {ref}, "v": {"full"}, "limit": {"10"}})
+
+	idData, err := c.Get("patient", url.Values{
+		"identifier": {ref}, "v": {"full"}, "limit": {"25"},
+	})
 	if err != nil {
 		return nil, err
 	}
-	results, _ := data["results"].([]any)
+	if idResults := asSlice(idData["results"]); len(idResults) > 0 {
+		return choosePatient(ref, idResults, true)
+	}
+
+	qData, err := c.Get("patient", url.Values{
+		"q": {ref}, "v": {"full"}, "limit": {"10"},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return choosePatient(ref, asSlice(qData["results"]), false)
+}
+
+// choosePatient picks a single patient from a result page.
+// identifierSearch: the server already filtered by identifier=; any
+// multi-hit set is ambiguity. Fuzzy q=: prefer structured exact
+// identifier matches, then a unique single hit as a name convenience.
+func choosePatient(ref string, results []any, identifierSearch bool) (map[string]any, error) {
+	if len(results) == 0 {
+		return nil, &client.APIError{
+			Message: fmt.Sprintf("no patient found matching %q", ref),
+			Code:    client.CodeNotFound,
+		}
+	}
+
+	if identifierSearch {
+		if len(results) == 1 {
+			rec, _ := results[0].(map[string]any)
+			return rec, nil
+		}
+		return nil, ambiguityError(ref, results)
+	}
+
 	// Prefer exact identifier matches over fuzzy name hits, using the
 	// structured identifier value (not the display label).
 	var matches []map[string]any
@@ -211,7 +256,10 @@ func resolvePatient(c *client.Client, ref string) (map[string]any, error) {
 		if len(results) > 1 {
 			return nil, ambiguityError(ref, results)
 		}
-		return nil, &client.APIError{Message: fmt.Sprintf("no patient found matching %q", ref), Code: client.CodeNotFound}
+		return nil, &client.APIError{
+			Message: fmt.Sprintf("no patient found matching %q", ref),
+			Code:    client.CodeNotFound,
+		}
 	case 1:
 		return matches[0], nil
 	default:

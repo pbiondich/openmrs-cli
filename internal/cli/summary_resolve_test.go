@@ -40,38 +40,121 @@ func TestResolvePatientByUUID(t *testing.T) {
 	}
 }
 
-func TestResolvePatientExactIdentifier(t *testing.T) {
+func TestResolvePatientUsesIdentifierParamFirst(t *testing.T) {
+	var sawIdentifier, sawQ bool
 	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"results": []any{
-				map[string]any{
-					"uuid":    "u1",
-					"display": "Alice",
-					"identifiers": []any{
-						map[string]any{"identifier": "1001HPV"},
+		q := r.URL.Query()
+		if q.Get("identifier") == "1001HPV" {
+			sawIdentifier = true
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"results": []any{
+					map[string]any{
+						"uuid":    "from-id",
+						"display": "Alice",
+						"identifiers": []any{
+							map[string]any{"identifier": "1001HPV"},
+						},
 					},
 				},
-				map[string]any{
-					"uuid":    "u2",
-					"display": "Bob",
-					"identifiers": []any{
-						map[string]any{"identifier": "OTHER"},
-					},
+			})
+			return
+		}
+		if q.Get("q") != "" {
+			sawQ = true
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"results": []any{
+					map[string]any{"uuid": "from-q", "display": "Wrong", "identifiers": []any{}},
 				},
-			},
-		})
+			})
+			return
+		}
+		http.NotFound(w, r)
 	})
 	p, err := resolvePatient(c, "1001HPV")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p["uuid"] != "u1" {
+	if !sawIdentifier {
+		t.Fatal("expected identifier= query")
+	}
+	if sawQ {
+		t.Fatal("must not fall through to q= when identifier= hits")
+	}
+	if p["uuid"] != "from-id" {
 		t.Fatalf("%v", p)
 	}
 }
 
-func TestResolvePatientAmbiguous(t *testing.T) {
+func TestResolvePatientIdentifierNotInFuzzyTopPage(t *testing.T) {
+	// Classic failure mode of the old code: exact MRN only appears via
+	// identifier=, not in the first page of q=.
 	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("identifier") == "RARE-MRN-99" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"results": []any{
+					map[string]any{
+						"uuid": "rare",
+						"display": "Rare Patient",
+						"identifiers": []any{
+							map[string]any{"identifier": "RARE-MRN-99"},
+						},
+					},
+				},
+			})
+			return
+		}
+		if q.Get("q") == "RARE-MRN-99" {
+			// Fuzzy page full of unrelated names, no exact ID match.
+			var results []any
+			for i := 0; i < 10; i++ {
+				results = append(results, map[string]any{
+					"uuid":        "other-" + string(rune('a'+i)),
+					"display":     "Other",
+					"identifiers": []any{},
+				})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"results": results})
+			return
+		}
+		http.NotFound(w, r)
+	})
+	p, err := resolvePatient(c, "RARE-MRN-99")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p["uuid"] != "rare" {
+		t.Fatalf("got %v, want rare patient from identifier=", p)
+	}
+}
+
+func TestResolvePatientAmbiguousIdentifier(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("identifier") == "SHARED" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"results": []any{
+					map[string]any{"uuid": "u1", "display": "A"},
+					map[string]any{"uuid": "u2", "display": "B"},
+				},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	})
+	_, err := resolvePatient(c, "SHARED")
+	var api *client.APIError
+	if err == nil || !asAPIErr(err, &api) || api.Code != client.CodeBadRequest {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestResolvePatientAmbiguousName(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("identifier") != "" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}})
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"results": []any{
 				map[string]any{"uuid": "u1", "display": "John A", "identifiers": []any{}},
@@ -102,6 +185,11 @@ func TestResolvePatientNotFound(t *testing.T) {
 
 func TestResolvePatientUniqueName(t *testing.T) {
 	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("identifier") != "" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"results": []any{}})
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"results": []any{
 				map[string]any{"uuid": "only", "display": "Unique Name", "identifiers": []any{}},
@@ -114,6 +202,17 @@ func TestResolvePatientUniqueName(t *testing.T) {
 	}
 	if p["uuid"] != "only" {
 		t.Fatalf("%v", p)
+	}
+}
+
+func TestResolvePatientEmptyRef(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("should not call server")
+	})
+	_, err := resolvePatient(c, "  ")
+	var api *client.APIError
+	if err == nil || !asAPIErr(err, &api) || api.Code != client.CodeBadRequest {
+		t.Fatalf("err=%v", err)
 	}
 }
 

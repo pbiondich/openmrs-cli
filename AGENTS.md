@@ -52,9 +52,9 @@ The dedicated commands (`patient`, `encounter`, `obs`, `concept`, `visit`,
 For a full clinical picture of one patient, prefer
 `omrs patient summary <identifier-or-uuid> --json` over assembling it
 yourself: it fans out REST and FHIR queries in parallel and returns
-IPS-aligned sections. Any identifier type resolves the patient on an
-exact value match (so does a UUID or a unique name), and an ambiguous
-reference errors with the candidates listed. Read the top-level `counts`
+IPS-aligned sections. Resolution order is UUID, then exact identifier=
+lookup, then fuzzy name search; an ambiguous reference errors with the
+candidates listed. Read the top-level `counts`
 object first: it gives every section's item count up front, so you know
 the record's shape before (and regardless of how far) you read the rest.
 Each section reports `status` and `source`. The status vocabulary
