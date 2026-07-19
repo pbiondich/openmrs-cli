@@ -48,12 +48,27 @@ exact value match (so does a UUID or a unique name), and an ambiguous
 reference errors with the candidates listed. Read the top-level `counts`
 object first: it gives every section's item count up front, so you know
 the record's shape before (and regardless of how far) you read the rest.
-Each section reports `status` (`ok` | `none` | `unavailable`) and
-`source`. Treat `none` as "nothing recorded" and `unavailable` as "could
-not fetch", and never conflate the two. A section may also carry
+Each section reports `status` and `source`. The status vocabulary
+follows a six-state absence model, cross-checked against FHIR's
+`Composition.section.emptyReason`:
+
+  | status | meaning |
+  |--------|---------|
+  | `ok` | data present |
+  | `confirmed-none` | the record asserts none exists (e.g. a documented "No known allergies") |
+  | `none` | nothing recorded; no assertion was ever made |
+  | `unavailable` | the fetch failed |
+  | `withheld` | the server denied access (HTTP 403) |
+
+Treat `none` as "nobody ever asked", never as proof of absence... only
+`confirmed-none` asserts absence. A section may also carry
 `partial: true`, meaning a nested fetch failed; the affected item is
 marked, e.g. `obsStatus: "unavailable"` on one encounter. UUIDs are
 preserved on every item for follow-up queries.
+
+One honest limit worth knowing: a server that silently filters rows for
+privacy reasons is invisible to any client vocabulary. `withheld` only
+appears when the server says so explicitly.
 
 Every other REST resource is reachable through the escape hatch:
 

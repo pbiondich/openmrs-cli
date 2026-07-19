@@ -56,7 +56,7 @@ Date filters accept ISO dates (`2026-01-01`), relative ages (`7d`, `4w`, `6m`, `
 
 Any identifier type resolves the patient, not just the MRN... an old ID, a national ID, whatever the server knows them by, as long as the value matches exactly. A unique name works too, as a convenience. And an ambiguous identifier always returns an error, with the candidates you might have meant instead.
 
-A few more choices worth knowing about: "No known allergies" is stated explicitly, per IPS, and the JSON output distinguishes "none recorded" from "couldn't fetch" so an agent never confuses the two. Medication summaries prefer FHIR and fall back to REST orders on servers without the fhir2 module. And if one section fails, the rest still render... a 7/8-complete summary is useful, IMO... and we shouldn't let perfect get in the way of pretty good.
+A few more choices worth knowing about: "No known allergies" appears only when the record actually asserts it... a patient nobody ever asked shows as "not assessed" instead, because those are very different clinical statements. The JSON status vocabulary follows a six-state absence model (credit to [Jonathan Payne's review](https://github.com/paynejd/openmrs-cli-agent-review) for pushing the original three further), so an agent never confuses "nothing recorded" with "couldn't fetch" with "access denied". Medication summaries prefer FHIR and fall back to REST orders on servers without the fhir2 module. And if one section fails, the rest still render... a 7/8-complete summary is useful, IMO... and we shouldn't let perfect get in the way of pretty good.
 
 ```bash
 omrs patient summary 5574MO-2

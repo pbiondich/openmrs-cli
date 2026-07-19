@@ -68,7 +68,7 @@ if [[ -n "$SUMMARY_UUID" ]]; then
 import json, sys
 d = json.load(sys.stdin)
 s = d.get("sections", {})
-ok = all(k in s and s[k]["status"] in ("ok", "none", "unavailable") for k in ("problems", "meds", "allergies"))
+ok = all(k in s and s[k]["status"] in ("ok", "confirmed-none", "none", "unavailable", "withheld") for k in ("problems", "meds", "allergies"))
 sys.exit(0 if ok else 1)'; then
     echo "PASS: patient summary"; PASS=$((PASS + 1))
   else

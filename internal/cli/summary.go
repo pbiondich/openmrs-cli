@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"regexp"
 	"sort"
@@ -23,10 +25,39 @@ var uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[
 
 const allSections = "visit,problems,meds,allergies,vitals,encounters,programs"
 
-// section holds one summary section's outcome. Status is one of:
-// "ok" (items present), "none" (fetched fine, nothing recorded),
-// "unavailable" (fetch failed; see error). Agents must distinguish
-// none-recorded from unavailable.
+// Section status literals follow the six-state absence model
+// (github.com/paynejd/openmrs-cli-agent-review, cross-checked against
+// FHIR Composition.section.emptyReason). A status is only ever emitted
+// when the code can determine it truthfully:
+//
+//	ok             data present                          (state 1)
+//	confirmed-none the record asserts none exists        (state 2, FHIR nilknown)
+//	none           nothing recorded; no assertion made   (state 3, FHIR notasked)
+//	unavailable    the fetch failed                      (state 4, FHIR unavailable)
+//	withheld       the server denied access, HTTP 403    (state 6, FHIR withheld)
+//
+// State 5 (partial) is the section's Partial flag plus per-item markers,
+// and the truncated key on --all fetches.
+const (
+	statusOK            = "ok"
+	statusConfirmedNone = "confirmed-none"
+	statusNone          = "none"
+	statusUnavailable   = "unavailable"
+	statusWithheld      = "withheld"
+)
+
+// statusForError maps a failed fetch to unavailable, or withheld when
+// the server explicitly denied access.
+func statusForError(err error) string {
+	var apiErr *client.APIError
+	if errors.As(err, &apiErr) && apiErr.HTTPStatus == http.StatusForbidden {
+		return statusWithheld
+	}
+	return statusUnavailable
+}
+
+// section holds one summary section's outcome. Agents must never
+// conflate the absence states; see the constants above.
 type section struct {
 	Status string `json:"status"`
 	Source string `json:"source,omitempty"`
@@ -51,9 +82,11 @@ name; an ambiguous reference errors with the candidates listed.
 
 Sections follow the International Patient Summary (IPS) core where it
 applies. Medications and vitals prefer the FHIR2 module and fall back to
-REST (noted in the output). A section that fails to load is marked
-"unavailable" and the rest of the summary still renders; "none" means
-the server answered and nothing is recorded.`,
+REST (noted in the output). Section statuses follow a six-state absence
+model: ok, confirmed-none (the record asserts absence), none (nothing
+recorded, no assertion), unavailable (fetch failed), withheld (access
+denied), plus a partial flag for nested failures. A failed section never
+stops the rest of the summary from rendering.`,
 	Example: `  omrs patient summary 5574MO-2
   omrs patient summary dd8e5b3d-1691-11df-97a5-7038c432aabf
   omrs patient summary 5574MO-2 --sections problems,meds,allergies --json`,
@@ -102,9 +135,7 @@ func runPatientSummary(cmd *cobra.Command, args []string) error {
 	run("problems", func() *section {
 		return restSection(c, "condition", url.Values{"patientUuid": {uuid}, "v": {"default"}}, "rest")
 	})
-	run("allergies", func() *section {
-		return restSection(c, "patient/"+uuid+"/allergy", url.Values{"v": {"default"}}, "rest")
-	})
+	run("allergies", func() *section { return allergiesSection(c, uuid) })
 	run("programs", func() *section {
 		return restSection(c, "programenrollment", url.Values{"patient": {uuid}, "v": {"default"}}, "rest")
 	})
@@ -127,7 +158,7 @@ func runPatientSummary(cmd *cobra.Command, args []string) error {
 	}
 
 	for name, s := range sections {
-		if s.Status == "unavailable" {
+		if s.Status == statusUnavailable || s.Status == statusWithheld {
 			output.Warn("section %q unavailable: %s", name, s.Error)
 		}
 		if s.Partial {
@@ -207,15 +238,32 @@ func ambiguityError(ref string, candidates []any) *client.APIError {
 func restSection(c *client.Client, path string, params url.Values, source string) *section {
 	data, err := c.Get(path, params)
 	if err != nil {
-		return &section{Status: "unavailable", Source: source, Items: []any{}, Error: err.Error()}
+		return &section{Status: statusForError(err), Source: source, Items: []any{}, Error: err.Error()}
 	}
 	items, _ := data["results"].([]any)
-	status := "ok"
+	status := statusOK
 	if len(items) == 0 {
-		status = "none"
+		status = statusNone
 		items = []any{}
 	}
 	return &section{Status: status, Source: source, Items: items}
+}
+
+// allergiesSection is the one place a true confident-negative exists:
+// OpenMRS records an explicit allergyStatus assertion on the patient.
+// An empty list only earns confirmed-none when the record says
+// "No known allergies"; otherwise it is state 3, not assessed. The
+// assertion needs its own fetch: the REST full representation omits
+// allergyStatus (custom representations carry it).
+func allergiesSection(c *client.Client, uuid string) *section {
+	s := restSection(c, "patient/"+uuid+"/allergy", url.Values{"v": {"default"}}, "rest")
+	if s.Status == statusNone {
+		p, err := c.Get("patient/"+uuid, url.Values{"v": {"custom:(allergyStatus)"}})
+		if err == nil && strings.EqualFold(output.Extract(p, "allergyStatus"), "No known allergies") {
+			s.Status = statusConfirmedNone
+		}
+	}
+	return s
 }
 
 // medsSection prefers FHIR MedicationRequest (richer, cleaner) and falls
@@ -249,9 +297,9 @@ func medsSection(c *client.Client, uuid string) *section {
 			return output.Extract(a, "medicationReference.display|medicationCodeableConcept.text") <
 				output.Extract(b, "medicationReference.display|medicationCodeableConcept.text")
 		})
-		status := "ok"
+		status := statusOK
 		if len(items) == 0 {
-			status = "none"
+			status = statusNone
 			items = []any{}
 		}
 		return &section{Status: status, Source: "fhir", Items: items}
@@ -260,7 +308,7 @@ func medsSection(c *client.Client, uuid string) *section {
 	output.Warn("FHIR unavailable for medications; falling back to REST orders")
 	data, err := c.Get("order", url.Values{"patient": {uuid}, "v": {"default"}, "limit": {"100"}})
 	if err != nil {
-		return &section{Status: "unavailable", Source: "rest-orders", Items: []any{}, Error: err.Error()}
+		return &section{Status: statusForError(err), Source: "rest-orders", Items: []any{}, Error: err.Error()}
 	}
 	var items []any
 	for _, r := range asSlice(data["results"]) {
@@ -285,7 +333,7 @@ func vitalsSection(c *client.Client, uuid string) *section {
 		"patient": {uuid}, "category": {"vital-signs"}, "_sort": {"-date"}, "_count": {"40"},
 	})
 	if err != nil {
-		return &section{Status: "unavailable", Source: "fhir", Items: []any{}, Error: err.Error()}
+		return &section{Status: statusForError(err), Source: "fhir", Items: []any{}, Error: err.Error()}
 	}
 	seen := map[string]bool{}
 	var items []any
@@ -312,7 +360,7 @@ func vitalsSection(c *client.Client, uuid string) *section {
 func encountersSection(c *client.Client, uuid string) *section {
 	data, err := c.GetAll("encounter", url.Values{"patient": {uuid}, "v": {"default"}}, 2000)
 	if err != nil {
-		return &section{Status: "unavailable", Source: "rest", Items: []any{}, Error: err.Error()}
+		return &section{Status: statusForError(err), Source: "rest", Items: []any{}, Error: err.Error()}
 	}
 	encs := asSlice(data["results"])
 	sort.SliceStable(encs, func(i, j int) bool {
@@ -353,9 +401,9 @@ func encountersSection(c *client.Client, uuid string) *section {
 	}
 	wg.Wait()
 
-	status := "ok"
+	status := statusOK
 	if len(encs) == 0 {
-		status = "none"
+		status = statusNone
 		encs = []any{}
 	}
 	return &section{Status: status, Source: "rest", Items: encs, Partial: partial}
@@ -396,13 +444,17 @@ func renderSummary(patient map[string]any, sections map[string]*section) {
 		}
 		fmt.Printf("\n%s\n", title)
 		switch s.Status {
-		case "unavailable":
+		case statusUnavailable:
 			fmt.Printf("  (unavailable: %s)\n", s.Error)
-		case "none":
+		case statusWithheld:
+			fmt.Println("  (withheld: the server denied access)")
+		case statusConfirmedNone:
+			fmt.Println("  No known allergies (confirmed in the record)")
+		case statusNone:
 			if name == "allergies" {
-				fmt.Println("  No known allergies (none recorded)")
+				fmt.Println("  Not assessed (no allergy information recorded)")
 			} else {
-				fmt.Println("  (none)")
+				fmt.Println("  (none recorded)")
 			}
 		default:
 			for _, item := range s.Items {
