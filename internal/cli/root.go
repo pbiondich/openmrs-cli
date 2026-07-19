@@ -2,6 +2,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -25,7 +26,6 @@ const PaginationCap = 5000
 var flags struct {
 	server   string
 	user     string
-	password string
 	profile  string
 	jsonOut  bool
 	tableOut bool
@@ -50,11 +50,14 @@ generic escape hatch (omrs get <path>) for every other REST resource.
 Output is a human-readable table on a terminal and JSON when piped;
 force either with --json or --table. Errors are structured JSON on
 stderr with stable exit codes:
-  0 success · 1 unknown · 2 auth · 3 connection · 4 not found · 5 bad request
+  0 success · 1 unknown · 2 auth · 3 connection · 4 not found · 5 bad request · 6 forbidden
 
 Servers are configured as named profiles (see omrs config --help).
 Defaults to http://localhost/openmrs; override with --server/--profile
-or the OMRS_SERVER, OMRS_USER, OMRS_PASSWORD, OMRS_PROFILE env vars.`,
+or the OMRS_SERVER, OMRS_USER, OMRS_PASSWORD, OMRS_PROFILE env vars.
+
+Passwords never appear on the command line (no -p flag). Use
+omrs login, OMRS_PASSWORD, or --password-stdin on login.`,
 	SilenceErrors: true,
 	SilenceUsage:  true,
 }
@@ -63,7 +66,6 @@ func init() {
 	pf := rootCmd.PersistentFlags()
 	pf.StringVarP(&flags.server, "server", "s", "", "OpenMRS server URL, e.g. https://dev3.openmrs.org/openmrs")
 	pf.StringVarP(&flags.user, "user", "u", "", "username")
-	pf.StringVarP(&flags.password, "password", "p", "", "password")
 	pf.StringVar(&flags.profile, "profile", "", "named config profile to use")
 	pf.BoolVar(&flags.jsonOut, "json", false, "force JSON output (default when piped)")
 	pf.BoolVar(&flags.tableOut, "table", false, "force table output (default on a terminal)")
@@ -85,6 +87,17 @@ func Execute() int {
 	return 0
 }
 
+// wrapResolveError maps config/credential failures to stable APIError codes.
+func wrapResolveError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, config.ErrCredentialStore) {
+		return &client.APIError{Message: err.Error(), Code: client.CodeAuth}
+	}
+	return err
+}
+
 // groupRunE is the RunE for parent commands like `omrs patient`: bare
 // invocation shows help (exit 0); an unrecognized subcommand is a USAGE
 // error on stderr with exit 1 — never exit-0 help on stdout, which an
@@ -100,15 +113,16 @@ func groupRunE(cmd *cobra.Command, args []string) error {
 }
 
 // newClient resolves connection settings and builds an API client.
+// Passwords come from the profile credential store, config file, or
+// OMRS_PASSWORD — never from a -p command-line flag.
 func newClient() (*client.Client, error) {
 	res, err := config.Resolve(config.Overrides{
-		Server:   flags.server,
-		User:     flags.user,
-		Password: flags.password,
-		Profile:  flags.profile,
+		Server:  flags.server,
+		User:    flags.user,
+		Profile: flags.profile,
 	})
 	if err != nil {
-		return nil, err
+		return nil, wrapResolveError(err)
 	}
 	return client.New(res), nil
 }

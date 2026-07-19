@@ -7,6 +7,7 @@ import (
 
 	"github.com/pbiondich/openmrs-cli/internal/config"
 	"github.com/pbiondich/openmrs-cli/internal/output"
+	"github.com/pbiondich/openmrs-cli/internal/secrets"
 )
 
 var configCmd = &cobra.Command{
@@ -65,7 +66,13 @@ var setProfileURL, setProfileUser, setProfilePassword string
 var configSetProfileCmd = &cobra.Command{
 	Use:   "set-profile <name>",
 	Short: "Create or update a named profile",
-	Args:  cobra.ExactArgs(1),
+	Long: `Create or update a named profile's URL and username.
+
+Prefer omrs login to store a password (OS credential store). If you must
+set a password here, it is written to the credential store when available
+and never left on disk when the store succeeds. The --password flag still
+appears in process listings — prefer login or OMRS_PASSWORD for scripts.`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
 		cfg, err := config.Load()
@@ -80,7 +87,16 @@ var configSetProfileCmd = &cobra.Command{
 			p.User = setProfileUser
 		}
 		if setProfilePassword != "" {
-			p.Password = setProfilePassword
+			// Prefer keychain; fall back to config file. Clear the other
+			// so there is a single source of truth.
+			if err := secrets.Set(name, setProfilePassword); err != nil {
+				output.Warn("OS credential store unavailable (%v); storing password in config file", err)
+				p.Password = setProfilePassword
+				p.PasswordStore = ""
+			} else {
+				p.Password = ""
+				p.PasswordStore = "keychain"
+			}
 		}
 		if p.URL == "" {
 			return fmt.Errorf("--url is required for a new profile")
@@ -109,6 +125,9 @@ var configRemoveProfileCmd = &cobra.Command{
 		}
 		if _, ok := cfg.Profiles[name]; !ok {
 			return fmt.Errorf("profile %q not found", name)
+		}
+		if err := secrets.Delete(name); err != nil {
+			output.Warn("could not remove credential-store entry: %v", err)
 		}
 		delete(cfg.Profiles, name)
 		if cfg.DefaultProfile == name {

@@ -22,28 +22,25 @@ go build -o omrs ./cmd/omrs && mv omrs /usr/local/bin/
 
 ## Quick start
 
+If you just want to poke at the public sandbox, this is the whole on-ramp:
+
 ```bash
-# Log in: prompts for server, username, and password (hidden), validates
-# against the server, and stores the password in the OS credential store
-# (macOS Keychain / Windows Credential Manager / Secret Service on Linux,
-# with a config-file fallback on headless systems)
-omrs login
-
-# Check who you are; exits 2 if not authenticated
+omrs login --demo
 omrs whoami
-
-# Or configure profiles by hand
-omrs config init            # creates 'local' and 'demo' profiles
-omrs config use demo        # make the public demo server your default
-
-# Query away
 omrs patient search "john"
-omrs patient get <uuid>
-omrs patient summary <id>        # one-page clinical summary, IPS-aligned sections
+```
+
+`--demo` uses the well-known public credentials on [dev3.openmrs.org](https://dev3.openmrs.org/openmrs), stores them under a `demo` profile (and makes it your default), and reminds you the server resets... never put anything you care about there.
+
+For a real server (or localhost), login the ordinary way... password is prompted, never echoed, and lands in the OS credential store when one is available:
+
+```bash
+omrs login -s https://your-openmrs.example.org/openmrs -u youruser
+# or: omrs login -s http://localhost/openmrs -u admin
+omrs whoami
+omrs patient summary <id>
 omrs concept search "malaria"
-omrs encounter list --patient <uuid>
 omrs encounter list --patient <uuid> --since 30d
-omrs obs list --patient <uuid> --concept <uuid>
 omrs obs list --patient <uuid> --since 2026-01-01 --until yesterday --all
 omrs location list
 ```
@@ -83,22 +80,30 @@ The CLI's output is yours to control: `--full`, `--ref`, or `--fields uuid,displ
 
 ## Authentication
 
-`omrs login` validates credentials against the server before saving anything. `omrs logout` removes them, including the credential-store entry. `omrs whoami` is a hard auth check that exits 2 when you're not authenticated.
+Two paths, on purpose:
 
-For scripts and agents:
+```bash
+omrs login --demo                                          # public sandbox, no prompts
+omrs login -s https://your-openmrs.example.org/openmrs -u youruser   # real server
+```
+
+In both cases, credentials are checked against the server *before* anything is saved. The password goes in the OS credential store (Keychain / Credential Manager / Secret Service)... with a config-file fallback only when there's no keyring. `omrs logout` clears it. `omrs whoami` is the hard check: exit 2 if you're not authenticated.
+
+Scripts and agents can skip the interactive prompt:
 
 ```bash
 echo "$OMRS_PW" | omrs login -s http://localhost/openmrs -u admin --password-stdin
+# or one-shot without saving: OMRS_SERVER / OMRS_USER / OMRS_PASSWORD
 ```
 
-One deliberate choice that I made that's worth calling out: there are no built-in default credentials. Access requires a profile, environment variables, flags, or a login.
+One deliberate choice: there is no `-p` flag, and `config init` does not write passwords. I don't want the easy path to teach people to leave secrets on the process line or in a starter config... the public demo is the exception, and it's labeled as such via `--demo`.
 
 ## For AI agents
 
 This tool was designed with agents as first-class users:
 
 - All results go to stdout. All errors go to stderr, and when stderr is piped (the agent case) they're one-line JSON: `{"error":"...","code":"AUTH","httpStatus":401,"detail":"..."}`. Humans at a terminal see plain readable text instead.
-- Exit codes are stable: `0` success, `1` unknown, `2` auth, `3` connection/timeout, `4` not found, `5` bad request.
+- Exit codes are stable: `0` success, `1` unknown, `2` auth, `3` connection/timeout, `4` not found, `5` bad request, `6` forbidden (HTTP 403).
 - Every command and flag is discoverable through `--help`, so an agent needs no documentation beyond the binary itself.
 
 The real test is telling your favorite coding agent "use `omrs` to explore my OpenMRS instance" and watching it figure the rest out on its own.
@@ -112,18 +117,18 @@ Profiles live in `~/.config/omrs/config.json` (mode 0600):
   "defaultProfile": "local",
   "profiles": {
     "local": {"url": "http://localhost/openmrs", "user": "admin", "passwordStore": "keychain"},
-    "demo":  {"url": "https://dev3.openmrs.org/openmrs", "user": "admin", "password": "Admin123"}
+    "demo":  {"url": "https://dev3.openmrs.org/openmrs", "user": "admin"}
   }
 }
 ```
 
-Profiles written by `omrs login` carry `"passwordStore": "keychain"` instead of a password. Precedence is flags (`-s/-u/-p`, `--profile`), then env (`OMRS_SERVER`, `OMRS_USER`, `OMRS_PASSWORD`, `OMRS_PROFILE`), then the default profile, then the built-in default URL (`http://localhost/openmrs`, with no default credentials).
+`omrs config init` only writes URL/user shells for `local` and `demo`... no passwords. After `omrs login`, the profile carries `"passwordStore": "keychain"` instead of a password field. Precedence is flags (`-s`/`-u`/`--profile`), then env (`OMRS_SERVER`, `OMRS_USER`, `OMRS_PASSWORD`, `OMRS_PROFILE`), then the default profile, then the built-in default URL (`http://localhost/openmrs`) with no default credentials.
 
 ## Development
 
 ```bash
-go build ./... && go vet ./...      # build + lint
-./scripts/smoke-test.sh ./omrs      # live smoke tests against dev3.openmrs.org
+go build ./... && go vet ./... && go test ./...   # build + unit tests
+./scripts/smoke-test.sh ./omrs                    # live smoke against the public demo
 ```
 
 The dependency list is deliberately small (cobra, x/term, go-keyring) and I'd like to keep it that way: a tool that touches patient data should be auditable in an afternoon.

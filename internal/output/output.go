@@ -4,6 +4,7 @@ package output
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -253,8 +254,8 @@ func Warn(format string, args ...any) {
 // code. Agents (stderr piped, or --json) get one-line structured JSON;
 // humans at a terminal get plain readable text.
 func PrintError(err error, forceJSON bool) int {
-	apiErr, ok := err.(*client.APIError)
-	if !ok {
+	var apiErr *client.APIError
+	if !errors.As(err, &apiErr) {
 		code := client.CodeUnknown
 		if isUsageError(err.Error()) {
 			code = client.CodeUsage

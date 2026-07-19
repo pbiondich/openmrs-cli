@@ -18,23 +18,32 @@ The output contract:
   |------|------|---------|
   | `UNKNOWN` | 1 | unclassified failure |
   | `USAGE` | 1 | bad command, flag, or arguments |
-  | `AUTH` | 2 | HTTP 401/403, or not authenticated |
+  | `AUTH` | 2 | HTTP 401, not authenticated, or missing credential-store secret |
   | `CONNECTION` | 3 | network failure or timeout |
   | `NOT_FOUND` | 4 | HTTP 404 / no match |
   | `BAD_REQUEST` | 5 | HTTP 400, or an ambiguous patient reference (candidates in `detail`) |
+  | `FORBIDDEN` | 6 | HTTP 403 — authenticated but access denied |
 
 - stderr also carries advisory one-line JSON of a second shape,
   `{"warning":"..."}`: no `code` field, and the exit code is unaffected.
-  Warnings flag things like client-side filtering, a truncated `--all`
-  fetch, or a credential-store problem. Treat them as context, not failure.
+  Warnings flag things like client-side filtering or a truncated `--all`
+  fetch. Treat them as context, not failure. A missing keychain secret is
+  a hard `AUTH` error (exit 2), not a warning.
 - A capped `--all` fetch also sets `"truncated": true` in the stdout
   payload itself... check for it before treating results as complete.
 
 Bootstrapping against a server:
 
 ```bash
+# Public sandbox (no prompts):
+omrs login --demo
+omrs whoami
+
+# Production / private server:
 echo "$PASSWORD" | omrs login -s <server-url> -u <user> --password-stdin
 omrs whoami          # verify; exits 2 if not authenticated
+
+# Or without login: OMRS_SERVER / OMRS_USER / OMRS_PASSWORD (never -p)
 ```
 
 The dedicated commands (`patient`, `encounter`, `obs`, `concept`, `visit`,
@@ -86,21 +95,25 @@ field selection), `--limit N`, `--all` (follows pagination, capped 5000),
 pair it with `--all`.
 
 A public sandbox exists at `https://dev3.openmrs.org/openmrs`
-(admin / Admin123). It resets periodically, so never store anything you
-care about there.
+(admin / Admin123). `omrs login --demo` is the one-command on-ramp: it
+uses those well-known credentials, saves them under the `demo` profile
+(and makes it the default), and prints a reminder that the server resets.
+Never store anything you care about there.
 
 ## Working on the codebase
 
 Build and verify:
 
 ```bash
-go build ./... && go vet ./...       # must pass clean
-go install ./cmd/omrs                # installs to $GOPATH/bin
-./scripts/smoke-test.sh omrs         # live tests against dev3.openmrs.org
+go build ./... && go vet ./... && go test ./...   # must pass clean
+go install ./cmd/omrs                             # installs to $GOPATH/bin
+./scripts/smoke-test.sh omrs                      # live tests against dev3.openmrs.org
 ```
 
-There are no unit tests; the smoke suite against the live demo server is
-the verification standard. Add a smoke check for any new command.
+Unit tests cover pure logic (dates, errors, pagination safety, patient
+resolve, config resolution). The smoke suite against the live demo server
+is the integration bar. Add a unit test for pure helpers and a smoke check
+for any new command.
 
 Layout:
 

@@ -47,10 +47,11 @@ const (
 )
 
 // statusForError maps a failed fetch to unavailable, or withheld when
-// the server explicitly denied access.
+// the server explicitly denied access (HTTP 403 / FORBIDDEN).
 func statusForError(err error) string {
 	var apiErr *client.APIError
-	if errors.As(err, &apiErr) && apiErr.HTTPStatus == http.StatusForbidden {
+	if errors.As(err, &apiErr) &&
+		(apiErr.HTTPStatus == http.StatusForbidden || apiErr.Code == client.CodeForbidden) {
 		return statusWithheld
 	}
 	return statusUnavailable

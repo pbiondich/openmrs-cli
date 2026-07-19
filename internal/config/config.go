@@ -13,10 +13,20 @@ import (
 )
 
 const (
-	DefaultURL      = "http://localhost/openmrs"
-	DefaultUser     = "admin"
-	DefaultPassword = "Admin123"
+	DefaultURL  = "http://localhost/openmrs"
+	DefaultUser = "admin"
+
+	// Public OpenMRS reference application (resets periodically).
+	// Used by `omrs login --demo` and the `demo` profile from config init.
+	DemoURL      = "https://dev3.openmrs.org/openmrs"
+	DemoUser     = "admin"
+	DemoPassword = "Admin123"
+	DemoProfile  = "demo"
 )
+
+// ErrCredentialStore is returned when a profile declares passwordStore=keychain
+// but the secret cannot be read and no flag/env password was supplied.
+var ErrCredentialStore = errors.New("credential store")
 
 type Profile struct {
 	URL      string `json:"url"`
@@ -56,6 +66,9 @@ func warnJSON(msg string) {
 }
 
 func Path() string {
+	if p := os.Getenv("OMRS_CONFIG"); p != "" {
+		return p
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return filepath.Join(".", ".omrs", "config.json")
@@ -64,12 +77,14 @@ func Path() string {
 }
 
 // Default returns the config written by `omrs config init`.
+// Profiles carry URLs and usernames only — never passwords. Credentials
+// come from `omrs login`, OMRS_PASSWORD, or set-profile after init.
 func Default() *Config {
 	return &Config{
 		DefaultProfile: "local",
 		Profiles: map[string]Profile{
-			"local": {URL: DefaultURL, User: DefaultUser, Password: DefaultPassword},
-			"demo":  {URL: "https://dev3.openmrs.org/openmrs", User: "admin", Password: "Admin123"},
+			"local": {URL: DefaultURL, User: DefaultUser},
+			"demo":  {URL: DemoURL, User: DemoUser},
 		},
 	}
 }
@@ -128,6 +143,10 @@ func Resolve(o Overrides) (Resolved, error) {
 	if profileName == "" {
 		profileName = cfg.DefaultProfile
 	}
+
+	// Track whether the profile expected a keychain entry so a missing
+	// secret can hard-fail after flag/env overrides are considered.
+	keychainProfile := ""
 	if profileName != "" {
 		p, ok := cfg.Profiles[profileName]
 		if !ok {
@@ -144,17 +163,16 @@ func Resolve(o Overrides) (Resolved, error) {
 				res.User = p.User
 			}
 			if p.PasswordStore == "keychain" {
-				// A failed credential-store read must not fall through
-				// silently — the resulting 401 would tell the user their
-				// password is wrong when it was never read at all.
+				keychainProfile = profileName
 				pw, err := secrets.Get(profileName)
 				switch {
 				case err == nil:
 					res.Password = pw
 				case errors.Is(err, secrets.ErrNotFound):
-					warnJSON(fmt.Sprintf("profile %q expects a credential-store entry but none was found; run 'omrs login'", profileName))
+					// Leave empty; hard-fail below if still unset after overrides.
 				default:
-					warnJSON(fmt.Sprintf("credential store read failed for profile %q: %v; requests will be unauthenticated", profileName, err))
+					return Resolved{}, fmt.Errorf("%w: read failed for profile %q: %v (run 'omrs login')",
+						ErrCredentialStore, profileName, err)
 				}
 			} else if p.Password != "" {
 				res.Password = p.Password
@@ -180,6 +198,13 @@ func Resolve(o Overrides) (Resolved, error) {
 	}
 	if o.Password != "" {
 		res.Password = o.Password
+	}
+
+	// Profile said keychain but we still have no password after all
+	// overrides — fail loudly so agents do not issue anonymous requests.
+	if keychainProfile != "" && res.Password == "" {
+		return Resolved{}, fmt.Errorf("%w: profile %q expects a credential-store entry but none was found; run 'omrs login' or set OMRS_PASSWORD",
+			ErrCredentialStore, keychainProfile)
 	}
 
 	return res, nil

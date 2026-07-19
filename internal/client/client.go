@@ -19,11 +19,16 @@ import (
 const (
 	CodeUnknown    = "UNKNOWN"     // exit 1
 	CodeUsage      = "USAGE"       // exit 1 (bad command/flag/args)
-	CodeAuth       = "AUTH"        // exit 2
+	CodeAuth       = "AUTH"        // exit 2 — not authenticated / bad credentials (HTTP 401)
 	CodeConnection = "CONNECTION"  // exit 3
 	CodeNotFound   = "NOT_FOUND"   // exit 4
 	CodeBadRequest = "BAD_REQUEST" // exit 5
+	CodeForbidden  = "FORBIDDEN"   // exit 6 — authenticated but denied (HTTP 403)
 )
+
+// MaxPages bounds pagination loops even when the item cap is not reached
+// (e.g. empty pages with a sticky next link).
+const MaxPages = 500
 
 func ExitCode(code string) int {
 	switch code {
@@ -35,6 +40,8 @@ func ExitCode(code string) int {
 		return 4
 	case CodeBadRequest:
 		return 5
+	case CodeForbidden:
+		return 6
 	default:
 		return 1
 	}
@@ -148,8 +155,10 @@ func (c *Client) getURL(u string) (map[string]any, error) {
 func apiErrorFromResponse(status int, body []byte) *APIError {
 	code := CodeUnknown
 	switch {
-	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+	case status == http.StatusUnauthorized:
 		code = CodeAuth
+	case status == http.StatusForbidden:
+		code = CodeForbidden
 	case status == http.StatusNotFound:
 		code = CodeNotFound
 	case status == http.StatusBadRequest:
@@ -184,6 +193,10 @@ func firstLine(s string) string {
 // fetch sets "truncated": true in the payload — stdout must carry the
 // incompleteness signal, not just stderr — and totalCount is passed
 // through when the server sent one.
+//
+// Next-link URIs are restricted to the same scheme and host as the
+// configured base URL so a malicious or misconfigured page cannot exfiltrate
+// Basic Auth credentials. Empty pages and a hard page cap stop infinite loops.
 func (c *Client) GetAll(path string, params url.Values, capItems int) (map[string]any, error) {
 	u := c.baseURL + "/ws/rest/v1/" + strings.TrimLeft(path, "/")
 	if len(params) > 0 {
@@ -193,12 +206,25 @@ func (c *Client) GetAll(path string, params url.Values, capItems int) (map[strin
 	var all []any
 	truncated := false
 	var totalCount any
-	for u != "" {
+	for pageNum := 0; u != ""; pageNum++ {
+		if pageNum >= MaxPages {
+			truncated = true
+			warn, _ := json.Marshal(map[string]string{
+				"warning": fmt.Sprintf("pagination page cap (%d) reached; results truncated", MaxPages),
+			})
+			fmt.Fprintln(os.Stderr, string(warn))
+			break
+		}
+
 		page, err := c.getURL(u)
 		if err != nil {
 			return nil, err
 		}
 		results, _ := page["results"].([]any)
+		if len(results) == 0 {
+			// Sticky next links with empty pages would loop forever.
+			break
+		}
 		all = append(all, results...)
 		if tc, ok := page["totalCount"]; ok {
 			totalCount = tc
@@ -212,7 +238,11 @@ func (c *Client) GetAll(path string, params url.Values, capItems int) (map[strin
 			fmt.Fprintln(os.Stderr, string(warn))
 			break
 		}
-		u = nextLink(page)
+		next, err := c.sanitizeNextURL(nextLink(page))
+		if err != nil {
+			return nil, err
+		}
+		u = next
 	}
 	out := map[string]any{"results": all}
 	if truncated {
@@ -222,6 +252,39 @@ func (c *Client) GetAll(path string, params url.Values, capItems int) (map[strin
 		out["totalCount"] = totalCount
 	}
 	return out, nil
+}
+
+// sanitizeNextURL validates a pagination next link. Empty input is fine
+// (end of list). Off-origin absolute URLs are rejected so credentials are
+// never sent to a host other than the configured server.
+func (c *Client) sanitizeNextURL(next string) (string, error) {
+	if next == "" {
+		return "", nil
+	}
+	base, err := url.Parse(c.baseURL)
+	if err != nil {
+		return "", &APIError{Message: fmt.Sprintf("invalid client base URL: %v", err), Code: CodeBadRequest}
+	}
+	u, err := url.Parse(next)
+	if err != nil {
+		return "", &APIError{Message: fmt.Sprintf("invalid pagination next link: %v", err), Code: CodeBadRequest}
+	}
+	if !u.IsAbs() {
+		u = base.ResolveReference(u)
+	}
+	if u.User != nil {
+		return "", &APIError{
+			Message: "refusing pagination next link that embeds credentials",
+			Code:    CodeBadRequest,
+		}
+	}
+	if !strings.EqualFold(u.Scheme, base.Scheme) || !strings.EqualFold(u.Host, base.Host) {
+		return "", &APIError{
+			Message: fmt.Sprintf("refusing off-origin pagination link %s (expected host %s)", u.Host, base.Host),
+			Code:    CodeBadRequest,
+		}
+	}
+	return u.String(), nil
 }
 
 func nextLink(page map[string]any) string {

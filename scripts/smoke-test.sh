@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # Live smoke tests for omrs against the OpenMRS public demo server.
 # Usage: ./scripts/smoke-test.sh [path-to-omrs-binary]
+# Credentials via env only (never -p on the command line).
 set -u
 
 OMRS="${1:-omrs}"
 SERVER="https://dev3.openmrs.org/openmrs"
-AUTH=(-s "$SERVER" -u admin -p Admin123)
+export OMRS_SERVER="$SERVER"
+export OMRS_USER="${OMRS_USER:-admin}"
+export OMRS_PASSWORD="${OMRS_PASSWORD:-Admin123}"
+AUTH=()
 PASS=0
 FAIL=0
 
@@ -46,7 +50,7 @@ echo "=== omrs smoke tests against $SERVER ==="
 check      "ping"                       "${AUTH[@]}" ping
 check_json "session"                    "${AUTH[@]}" session
 check_json "whoami"                     "${AUTH[@]}" whoami
-check_exit "whoami unauthenticated"  2  -s "$SERVER" -u admin -p wrongpass whoami
+check_exit "whoami unauthenticated"  2  env OMRS_PASSWORD=wrongpass "$OMRS" whoami
 check_json "patient search"             "${AUTH[@]}" patient search john --limit 3
 check_json "concept search"             "${AUTH[@]}" concept search malaria --limit 3
 check_json "location list"              "${AUTH[@]}" location list --limit 5
@@ -94,9 +98,10 @@ else
   echo "FAIL: summary counts index"; FAIL=$((FAIL + 1))
 fi
 check_exit "bad --since rejected"    1  "${AUTH[@]}" encounter list --since "not-a-date"
-check_exit "auth error is exit 2"    2  -s "$SERVER" -u admin -p wrongpass patient search john
-check_exit "connection error is exit 3" 3 -s https://no-such-host-omrs.invalid/openmrs ping
+check_exit "auth error is exit 2"    2  env OMRS_PASSWORD=wrongpass "$OMRS" patient search john
+check_exit "connection error is exit 3" 3 env OMRS_SERVER=https://no-such-host-omrs.invalid/openmrs "$OMRS" ping
 check_exit "not-found is exit 4"     4  "${AUTH[@]}" patient get 00000000-dead-beef-0000-000000000000
+check_exit "no -p flag (usage)"      1  "$OMRS" --password secret whoami
 
 echo
 echo "Results: $PASS passed, $FAIL failed"
