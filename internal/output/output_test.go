@@ -229,6 +229,11 @@ func TestTruncateIsRuneSafe(t *testing.T) {
 	if truncate("short", 60) != "short" {
 		t.Fatal("short strings must pass through")
 	}
+	// n is a rune budget: n-1 characters plus the ellipsis.
+	got := truncate(strings.Repeat("é", 100), 10)
+	if runeCount := len([]rune(got)); runeCount != 10 {
+		t.Fatalf("want 10 runes (9 + ellipsis), got %d: %q", runeCount, got)
+	}
 }
 
 func TestWarnEmitsValidJSONWithQuotes(t *testing.T) {
