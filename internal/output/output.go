@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"unicode/utf8"
 
 	"github.com/pbiondich/openmrs-cli/internal/client"
 )
@@ -218,11 +219,18 @@ func formatValue(v any) string {
 	}
 }
 
+// truncate shortens s to at most n bytes plus an ellipsis, never
+// cutting a multibyte rune in half (invalid UTF-8 corrupts terminals
+// and downstream JSON logs).
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n-1] + "…"
+	cut := n - 1
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }
 
 // usagePrefixes identify cobra's own parse/usage errors (unknown

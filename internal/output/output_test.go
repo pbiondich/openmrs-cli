@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/pbiondich/openmrs-cli/internal/client"
 )
@@ -118,5 +120,126 @@ func TestPrintErrorUsage(t *testing.T) {
 	_ = json.Unmarshal(body, &m)
 	if m["code"] != client.CodeUsage {
 		t.Fatalf("%s", body)
+	}
+}
+
+// captureFile swaps out *f (os.Stdout or os.Stderr) for a pipe while fn
+// runs and returns everything written.
+func captureFile(t *testing.T, f **os.File, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := *f
+	*f = w
+	defer func() { *f = old }()
+	fn()
+	_ = w.Close()
+	body, _ := io.ReadAll(r)
+	return string(body)
+}
+
+func TestPrintJSONModeEmitsValidJSON(t *testing.T) {
+	data := map[string]any{"results": []any{map[string]any{"uuid": "u1", "display": `has "quotes"`}}}
+	out := captureFile(t, &os.Stdout, func() {
+		if err := Print(data, ModeJSON, "patient"); err != nil {
+			t.Error(err)
+		}
+	})
+	var m map[string]any
+	if err := json.Unmarshal([]byte(out), &m); err != nil {
+		t.Fatalf("stdout is not valid JSON: %v\n%s", err, out)
+	}
+	if len(m["results"].([]any)) != 1 {
+		t.Fatalf("%v", m)
+	}
+}
+
+func TestPrintTableUsesResourceColumnsAndCounts(t *testing.T) {
+	data := map[string]any{"results": []any{
+		map[string]any{"uuid": "u1", "display": "OpenMRS ID = 1", "person": map[string]any{
+			"display": "Ada Lovelace", "gender": "F", "age": float64(36), "birthdate": "1990-01-01"}},
+		map[string]any{"uuid": "u2", "display": "OpenMRS ID = 2", "person": map[string]any{
+			"display": "Grace Hopper", "gender": "F", "age": float64(45), "birthdate": "1981-01-01"}},
+	}}
+	out := captureFile(t, &os.Stdout, func() {
+		_ = Print(data, ModeTable, "patient")
+	})
+	for _, want := range []string{"UUID", "NAME", "GENDER", "Ada Lovelace", "Grace Hopper", "2 result(s)"} {
+		if !bytes.Contains([]byte(out), []byte(want)) {
+			t.Fatalf("table missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestPrintTableFallbackColumnsForUnknownResource(t *testing.T) {
+	data := map[string]any{"results": []any{map[string]any{"uuid": "x", "display": "Thing"}}}
+	out := captureFile(t, &os.Stdout, func() {
+		_ = Print(data, ModeTable, "no-such-resource")
+	})
+	if !bytes.Contains([]byte(out), []byte("DISPLAY")) || !bytes.Contains([]byte(out), []byte("Thing")) {
+		t.Fatalf("fallback columns not used:\n%s", out)
+	}
+}
+
+func TestPrintRecordOrderingAndSkips(t *testing.T) {
+	rec := map[string]any{
+		"zeta":            "last",
+		"uuid":            "u1",
+		"display":         "Ada",
+		"links":           []any{map[string]any{"rel": "self"}},
+		"resourceVersion": "1.8",
+		"alpha":           "early",
+	}
+	out := captureFile(t, &os.Stdout, func() {
+		_ = Print(rec, ModeTable, "")
+	})
+	if bytes.Contains([]byte(out), []byte("links")) || bytes.Contains([]byte(out), []byte("resourceVersion")) {
+		t.Fatalf("noise keys must be skipped:\n%s", out)
+	}
+	uuidPos := bytes.Index([]byte(out), []byte("uuid"))
+	alphaPos := bytes.Index([]byte(out), []byte("alpha"))
+	zetaPos := bytes.Index([]byte(out), []byte("zeta"))
+	if uuidPos < 0 || alphaPos < 0 || zetaPos < 0 || !(uuidPos < alphaPos && alphaPos < zetaPos) {
+		t.Fatalf("ordering wrong (uuid=%d alpha=%d zeta=%d):\n%s", uuidPos, alphaPos, zetaPos, out)
+	}
+}
+
+func TestTruncateIsRuneSafe(t *testing.T) {
+	// A long run of multibyte characters must never be cut mid-rune —
+	// invalid UTF-8 in table output corrupts terminals and JSON logs.
+	// Try many cut points so at least one lands mid-rune for 2-, 3-, and
+	// 4-byte encodings.
+	for _, sample := range []string{
+		strings.Repeat("é", 100),  // 2 bytes
+		strings.Repeat("ብ", 100),  // 3 bytes
+		strings.Repeat("😀", 100), // 4 bytes
+	} {
+		for n := 10; n < 20; n++ {
+			got := truncate(sample, n)
+			if !utf8.ValidString(got) {
+				t.Fatalf("truncate(%q-run, %d) produced invalid UTF-8: %q", sample[:4], n, got)
+			}
+			if !strings.HasSuffix(got, "…") {
+				t.Fatalf("expected ellipsis suffix, got %q", got)
+			}
+		}
+	}
+	if truncate("short", 60) != "short" {
+		t.Fatal("short strings must pass through")
+	}
+}
+
+func TestWarnEmitsValidJSONWithQuotes(t *testing.T) {
+	out := captureFile(t, &os.Stderr, func() {
+		Warn("profile %q failed: %s", "we\"ird", `detail with "quotes"`)
+	})
+	var m map[string]string
+	if err := json.Unmarshal([]byte(out), &m); err != nil {
+		t.Fatalf("warning is not valid JSON: %v\n%s", err, out)
+	}
+	if m["warning"] == "" {
+		t.Fatalf("%v", m)
 	}
 }
