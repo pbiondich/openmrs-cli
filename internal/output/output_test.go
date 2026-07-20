@@ -103,23 +103,29 @@ func TestPrintErrorWrappedAPIError(t *testing.T) {
 }
 
 func TestPrintErrorUsage(t *testing.T) {
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
+	cases := []string{
+		`unknown command "foo" for "omrs"`,
+		"if any flags in the group [full ref fields] are set none of the others can be; [full ref] were all set",
 	}
-	old := os.Stderr
-	os.Stderr = w
-	code := PrintError(errors.New("unknown command \"foo\" for \"omrs\""), true)
-	_ = w.Close()
-	os.Stderr = old
-	if code != 1 {
-		t.Fatalf("exit=%d", code)
-	}
-	body, _ := io.ReadAll(r)
-	var m map[string]any
-	_ = json.Unmarshal(body, &m)
-	if m["code"] != client.CodeUsage {
-		t.Fatalf("%s", body)
+	for _, msg := range cases {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		old := os.Stderr
+		os.Stderr = w
+		code := PrintError(errors.New(msg), true)
+		_ = w.Close()
+		os.Stderr = old
+		if code != 1 {
+			t.Fatalf("exit=%d for %q", code, msg)
+		}
+		body, _ := io.ReadAll(r)
+		var m map[string]any
+		_ = json.Unmarshal(body, &m)
+		if m["code"] != client.CodeUsage {
+			t.Fatalf("%s", body)
+		}
 	}
 }
 

@@ -75,6 +75,9 @@ func init() {
 	pf.BoolVar(&flags.full, "full", false, "full representation (v=full)")
 	pf.BoolVar(&flags.ref, "ref", false, "minimal representation (v=ref)")
 	pf.StringVar(&flags.fields, "fields", "", "custom fields, comma-separated (v=custom), e.g. uuid,display,person.age")
+	// Exactly one representation mode; previously --full silently won over
+	// --ref/--fields, which is easy for an agent to miss.
+	rootCmd.MarkFlagsMutuallyExclusive("full", "ref", "fields")
 	pf.IntVarP(&flags.limit, "limit", "l", 25, "results per page")
 	pf.IntVar(&flags.start, "start", 0, "start index for pagination")
 	pf.BoolVar(&flags.all, "all", false, fmt.Sprintf("fetch all pages (cap %d)", PaginationCap))

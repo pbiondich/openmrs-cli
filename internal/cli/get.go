@@ -33,30 +33,10 @@ list limit). Collection paths honor --limit / --all.`,
   omrs get obs --param patient=<uuid> --param concept=<uuid>`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		path := args[0]
-		params := url.Values{}
-
-		// Inline ?k=v query strings merge with --param flags.
-		if i := strings.IndexByte(path, '?'); i >= 0 {
-			inline, err := url.ParseQuery(path[i+1:])
-			if err != nil {
-				return fmt.Errorf("invalid query string in path: %w", err)
-			}
-			for k, vs := range inline {
-				for _, v := range vs {
-					params.Add(k, v)
-				}
-			}
-			path = path[:i]
+		path, params, err := buildGetQuery(args[0], getParams)
+		if err != nil {
+			return err
 		}
-		for _, kv := range getParams {
-			k, v, found := strings.Cut(kv, "=")
-			if !found || k == "" {
-				return fmt.Errorf("--param must be key=value, got %q", kv)
-			}
-			params.Add(k, v)
-		}
-
 		resource := strings.SplitN(path, "/", 2)[0]
 		if isInstancePath(path) {
 			// Merge representation flags only; do not force limit.
@@ -64,6 +44,32 @@ list limit). Collection paths honor --limit / --all.`,
 		}
 		return fetchList(cmd.Context(), path, params, resource)
 	},
+}
+
+// buildGetQuery merges an optional inline ?query with --param key=value
+// flags. The returned path has the query string stripped.
+func buildGetQuery(path string, params []string) (string, url.Values, error) {
+	out := url.Values{}
+	if i := strings.IndexByte(path, '?'); i >= 0 {
+		inline, err := url.ParseQuery(path[i+1:])
+		if err != nil {
+			return "", nil, fmt.Errorf("invalid query string in path: %w", err)
+		}
+		for k, vs := range inline {
+			for _, v := range vs {
+				out.Add(k, v)
+			}
+		}
+		path = path[:i]
+	}
+	for _, kv := range params {
+		k, v, found := strings.Cut(kv, "=")
+		if !found || k == "" {
+			return "", nil, fmt.Errorf("--param must be key=value, got %q", kv)
+		}
+		out.Add(k, v)
+	}
+	return path, out, nil
 }
 
 // isInstancePath reports paths of the form resource/<uuid> (exactly two

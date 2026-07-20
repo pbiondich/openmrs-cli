@@ -151,3 +151,28 @@ func TestPromptDefault(t *testing.T) {
 		t.Fatalf("empty line must return default, got %q", got)
 	}
 }
+
+func TestCompleteLoginPropagatesHTTPAuthError(t *testing.T) {
+	secrets.MockInit()
+	isolatedConfig(t)
+	// 401 from /session (distinct from authenticated:false body).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/session") {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"message":"Invalid username/password"}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	cfg := &config.Config{Profiles: map[string]config.Profile{}}
+	err := completeLogin(cfg, "p", srv.URL, "alice", "wrong", false)
+	api, ok := err.(*client.APIError)
+	if !ok || api.Code != client.CodeAuth {
+		t.Fatalf("want AUTH from HTTP 401, got %v", err)
+	}
+	if api.HTTPStatus != http.StatusUnauthorized {
+		t.Fatalf("httpStatus=%d", api.HTTPStatus)
+	}
+}

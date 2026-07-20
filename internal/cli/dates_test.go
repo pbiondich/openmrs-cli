@@ -1,6 +1,9 @@
 package cli
 
 import (
+	"io"
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -86,5 +89,33 @@ func TestFilterResultsByDate(t *testing.T) {
 	}
 	if got[0].(map[string]any)["id"] != "b" {
 		t.Fatalf("%v", got[0])
+	}
+}
+
+func TestWarnClientSideFilter(t *testing.T) {
+	oldAll := flags.all
+	t.Cleanup(func() { flags.all = oldAll })
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = oldStderr })
+
+	flags.all = false
+	warnClientSideFilter("obs")
+	flags.all = true
+	warnClientSideFilter("obs") // suppressed when --all already fetches everything
+
+	_ = w.Close()
+	body, _ := io.ReadAll(r)
+	s := string(body)
+	if !strings.Contains(s, "client-side") || !strings.Contains(s, "obs") {
+		t.Fatalf("expected client-side warning, got %q", s)
+	}
+	if n := strings.Count(s, `"warning"`); n != 1 {
+		t.Fatalf("want 1 warning (--all should suppress), got %d in %q", n, s)
 	}
 }

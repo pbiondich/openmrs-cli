@@ -92,6 +92,12 @@ echo "$OMRS_PW" | omrs login -s http://localhost/openmrs -u admin --password-std
 #   OMRS_SERVER=... OMRS_USER=... OMRS_PASSWORD=... omrs whoami
 ```
 
+### Credential store notes
+
+Passwords never appear on the command line (there is no `-p` flag). Prefer the OS store when it is available; `OMRS_PASSWORD` and `--password-stdin` cover headless CI and agents.
+
+One library-level caveat on macOS: [go-keyring](https://github.com/zalando/go-keyring) stores secrets via the `security` CLI rather than the Keychain API with an ACL prompt. In practice, **any process running as your user can often read the stored password without a Keychain unlock dialog**. That is weaker than the “app-bound Keychain item” model people sometimes assume. Linux Secret Service and Windows Credential Manager have their own trust models too. Treat a logged-in shell as trusted, use short-lived env credentials when you can, and `omrs logout` when you are done with a profile.
+
 ## For AI agents
 
 This tool was designed with agents as first-class users:
@@ -128,6 +134,10 @@ go build ./... && go vet ./... && go test ./...   # build + unit tests
 The dependency list is deliberately small (cobra, x/term, go-keyring) and I'd like to keep it that way: a tool that touches patient data should be auditable in an afternoon.
 
 Agent and contributor contracts live in [`AGENTS.md`](AGENTS.md). A portable skill for coding agents that *use* `omrs` against a server is in [`skills/omrs/SKILL.md`](skills/omrs/SKILL.md).
+
+## License
+
+[Mozilla Public License 2.0](https://www.mozilla.org/en-US/MPL/2.0/) with the OpenMRS healthcare disclaimer appended (see [`LICENSE`](LICENSE)). GitHub’s license classifier may show this as “Other” / `NOASSERTION` because the file is not pure stock MPL-2.0 text; the governing terms are still MPL-2.0 plus that healthcare disclaimer.
 
 ## Where this goes next
 

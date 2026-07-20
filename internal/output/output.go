@@ -235,6 +235,8 @@ func truncate(s string, n int) string {
 var usagePrefixes = []string{
 	"unknown command", "unknown flag", "unknown shorthand",
 	"flag needs", "invalid argument", "accepts ", "requires ",
+	// cobra MarkFlagsMutuallyExclusive / MarkFlagsRequiredTogether
+	"if any flags in the group",
 }
 
 func isUsageError(msg string) bool {
