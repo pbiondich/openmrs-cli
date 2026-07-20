@@ -127,6 +127,8 @@ go build ./... && go vet ./... && go test ./...   # build + unit tests
 
 The dependency list is deliberately small (cobra, x/term, go-keyring) and I'd like to keep it that way: a tool that touches patient data should be auditable in an afternoon.
 
+Agent and contributor contracts live in [`AGENTS.md`](AGENTS.md). A portable skill for coding agents that *use* `omrs` against a server is in [`skills/omrs/SKILL.md`](skills/omrs/SKILL.md).
+
 ## Where this goes next
 
 Write operations behind explicit flags and more convenience query commands as requested and that I can dream up. :)
