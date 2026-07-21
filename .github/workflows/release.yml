@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - "v*"
+      # Forgive a missing v: the GitHub UI happily creates bare tags like
+      # 0.7.1, and a release with no artifacts is worse than a loose glob.
+      - "[0-9]*.[0-9]*.[0-9]*"
 
 permissions:
   contents: write
