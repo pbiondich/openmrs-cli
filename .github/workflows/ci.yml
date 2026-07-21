@@ -19,6 +19,13 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...
 
+      # Fail loudly when a known vulnerability lands in the stdlib or a
+      # dependency — a tool that ships clinical-system credentials over
+      # TLS cannot build against a known-broken crypto stack. The fix is
+      # usually one toolchain bump in go.mod.
+      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - run: govulncheck ./...
+
   # The smoke suite is the declared integration bar (AGENTS.md); CI must
   # actually run it, or it silently rots — which is exactly what happened
   # once already. Runs against the public demo server.

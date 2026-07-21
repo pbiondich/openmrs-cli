@@ -1,0 +1,16 @@
+version: 2
+updates:
+  # Go module dependencies (including toolchain/stdlib patch releases).
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      go-deps:
+        patterns: ["*"]
+
+  # Pinned GitHub Actions in workflows.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
