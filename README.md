@@ -52,13 +52,14 @@ Date filters accept ISO dates (`2026-01-01`), relative ages (`7d`, `4w`, `6m`, `
 
 `omrs patient summary <identifier-or-uuid>` assembles a one-page clinical picture from parallel REST and FHIR queries: active visit, problems, medications, allergies, vitals, recent encounters with their observations, and program enrollments. The sections follow the [International Patient Summary (IPS)](https://hl7.org/fhir/uv/ips/) core where it applies, so the output will hopefully feel familiar and maps cleanly onto `$summary` when OpenMRS grows IPS server-side support.
 
-Any identifier type resolves the patient, not just the MRN... an old ID, a national ID, whatever the server knows them by, as long as the value matches exactly. A unique name works too, as a convenience. And an ambiguous identifier always returns an error, with the candidates you might have meant instead.
+`omrs patient everything <identifier-or-uuid>` is the companion when fidelity matters more than a tidy chart. OpenMRS sites are gloriously bespoke, so a curated summary will always be best-effort... `everything` is a capped REST dump shaped for tools and agents (compact typed JSON, not a full FHIR wire dump), so you can compare the summary to more of what the server actually has. Different job than `summary`; same patient resolution. Details in [`docs/json-output.md`](docs/json-output.md).
 
-A few more choices worth knowing about: "No known allergies" appears only when the record actually asserts it... a patient nobody ever asked shows as "not assessed" instead, because those are very different clinical statements. The JSON status vocabulary follows a six-state absence model, with credit owed in two directions: to [Jonathan Payne's review](https://github.com/paynejd/openmrs-cli-agent-review) for pushing the original three states further, and to the FHIR spec's [emptyReason](https://hl7.org/fhir/R4/valueset-list-empty-reason.html) codes, which had already worked the same problem for clinical documents. The result: an agent never confuses "nothing recorded" with "couldn't fetch" with "access denied". Medication summaries prefer FHIR and fall back to REST orders on servers without the fhir2 module. And if one section fails, the rest still render... a 7/8-complete summary is useful, IMO... and we shouldn't let perfect get in the way of pretty good.
+Any identifier type resolves the patient, not just the MRN... an old ID, a national ID, whatever the server knows them by, as long as the value matches exactly. A unique name works too, as a convenience. And an ambiguous identifier always returns an error, with the candidates you might have meant instead.
 
 ```bash
 omrs patient summary 5574MO-2
 omrs patient summary 5574MO-2 --sections problems,meds,allergies --json
+omrs patient everything 5574MO-2 --json
 ```
 
 ## Full REST API coverage
