@@ -394,3 +394,46 @@ func TestDoPOSTMethod(t *testing.T) {
 		t.Fatalf("%v", out)
 	}
 }
+
+func TestGetAllExactCapIsNotTruncated(t *testing.T) {
+	// Exactly cap items with no next link: complete, never "truncated".
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"results": []any{
+				map[string]any{"uuid": "a"}, map[string]any{"uuid": "b"},
+			},
+		})
+	}))
+	defer srv.Close()
+	c := New(config.Resolved{URL: srv.URL})
+	out, err := c.GetAll("thing", url.Values{}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["truncated"] == true {
+		t.Fatal("exact-cap complete fetch must not claim truncated")
+	}
+	if len(out["results"].([]any)) != 2 {
+		t.Fatalf("%v", out["results"])
+	}
+}
+
+func TestGetAllCapWithNextLinkIsTruncated(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"results": []any{map[string]any{"uuid": "a"}, map[string]any{"uuid": "b"}},
+			"links": []any{map[string]any{
+				"rel": "next", "uri": srvURL(r) + "/ws/rest/v1/thing?startIndex=2",
+			}},
+		})
+	}))
+	defer srv.Close()
+	c := New(config.Resolved{URL: srv.URL})
+	out, err := c.GetAll("thing", url.Values{}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["truncated"] != true {
+		t.Fatal("cap hit with a next page advertised must be truncated")
+	}
+}

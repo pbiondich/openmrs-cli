@@ -64,10 +64,14 @@ For a full clinical picture of one patient, prefer
 `omrs patient summary <identifier-or-uuid> --json` over assembling it
 yourself: it fans out REST and FHIR queries in parallel and returns
 IPS-aligned sections. For a high-recall, capped REST package (compact
-typed entries — not a curated chart), use
+typed entries, not a curated chart), use
 `omrs patient everything <identifier-or-uuid> --json` (see
 `docs/json-output.md`). Prefer summary first; escalate to everything when
 sections are incomplete or the question needs more of the site's raw data.
+Everything keeps `Visit` and `Encounter` as separate entry types (site
+truth, unlike FHIR's merged Encounter); numeric obs values carry units as
+`{n, u}`; per-type caps are `--cap-*` flags, and the global list flags
+(`--limit`, `--all`, `--fields`, ...) are rejected there with USAGE.
 
 Resolution order is UUID, then exact identifier=
 lookup, then fuzzy name search; an ambiguous reference errors with the

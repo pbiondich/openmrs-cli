@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/url"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -18,6 +17,7 @@ import (
 
 // Default per-type caps for patient everything (REST composite package).
 const (
+	everythingVisitCap = 50
 	everythingEncCap   = 50
 	everythingObsCap   = 500
 	everythingOrderCap = 100
@@ -28,6 +28,7 @@ const (
 )
 
 var (
+	everythingCapVisit int
 	everythingCapEnc   int
 	everythingCapObs   int
 	everythingCapOrder int
@@ -48,8 +49,15 @@ them. It is shaped like a FHIR $everything bag of resources for familiarity,
 but it is a REST composite for this CLI — not a FHIR server operation or an
 OpenMRS community exchange format.
 
-Entry types (t): Patient, Encounter, Observation, Condition,
+Entry types (t): Patient, Visit, Encounter, Observation, Condition,
 AllergyIntolerance, MedicationRequest, EpisodeOfCare (program enrollments).
+Visit is a deliberate divergence from FHIR naming: OpenMRS visits and
+encounters are distinct resources on the server, and this package
+reports site truth rather than remodeling it. Encounter entries carry a
+visit reference when the server links them.
+
+Global list flags (--limit, --all, --fields, --full, --ref, --start) are
+not supported here; use the --cap-* flags instead.
 
 Caps default to safe limits; hitting any cap sets truncated: true.`,
 	Example: `  omrs patient everything 5574MO-2 --json
@@ -59,6 +67,9 @@ Caps default to safe limits; hitting any cap sets truncated: true.`,
 }
 
 func runPatientEverything(cmd *cobra.Command, args []string) error {
+	if err := rejectUnsupportedGlobals(); err != nil {
+		return err
+	}
 	c, err := newClient(cmd.Context())
 	if err != nil {
 		return err
@@ -74,6 +85,7 @@ func runPatientEverything(cmd *cobra.Command, args []string) error {
 	}
 
 	caps := everythingCaps{
+		Visit:     everythingCapVisit,
 		Encounter: everythingCapEnc,
 		Obs:       everythingCapObs,
 		Order:     everythingCapOrder,
@@ -91,6 +103,21 @@ func runPatientEverything(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// rejectUnsupportedGlobals fails loudly when list-shaping flags are
+// passed: silently ignoring them would let --limit 3 look obeyed.
+func rejectUnsupportedGlobals() error {
+	for _, name := range []string{"limit", "all", "fields", "full", "ref", "start"} {
+		f := rootCmd.PersistentFlags().Lookup(name)
+		if f != nil && f.Changed {
+			return &client.APIError{
+				Message: fmt.Sprintf("--%s is not supported by patient everything; use the --cap-* flags", name),
+				Code:    client.CodeUsage,
+			}
+		}
+	}
+	return nil
+}
+
 // everythingPackageMap converts the typed package to map[string]any for output.Print.
 func everythingPackageMap(pkg everythingPackage) map[string]any {
 	b, err := json.Marshal(pkg)
@@ -105,10 +132,13 @@ func everythingPackageMap(pkg everythingPackage) map[string]any {
 }
 
 type everythingCaps struct {
-	Encounter, Obs, Order, Condition, Allergy, Program int
+	Visit, Encounter, Obs, Order, Condition, Allergy, Program int
 }
 
 func normalizeEverythingCaps(c *everythingCaps) {
+	if c.Visit < 1 {
+		c.Visit = everythingVisitCap
+	}
 	if c.Encounter < 1 {
 		c.Encounter = everythingEncCap
 	}
@@ -157,13 +187,22 @@ func fetchEverythingPackage(c *client.Client, patient map[string]any, uuid strin
 
 	jobs := []func() everythingFetchResult{
 		func() everythingFetchResult {
+			return fetchEverythingList(c, "Visit", "visit", url.Values{
+				"patient": {uuid}, "v": {"default"},
+			}, caps.Visit, compactVisit)
+		},
+		func() everythingFetchResult {
 			return fetchEverythingList(c, "Encounter", "encounter", url.Values{
 				"patient": {uuid}, "v": {"default"},
 			}, caps.Encounter, compactEncounter)
 		},
 		func() everythingFetchResult {
+			// Custom representation so numeric observations carry the
+			// concept's units — a quantity without units is a clinical
+			// hazard, not a compaction win.
 			return fetchEverythingList(c, "Observation", "obs", url.Values{
-				"patient": {uuid}, "v": {"default"},
+				"patient": {uuid},
+				"v":       {"custom:(uuid,obsDatetime,concept:(uuid,display,units),value:(uuid,display),encounter:(uuid))"},
 			}, caps.Obs, compactObs)
 		},
 		func() everythingFetchResult {
@@ -229,6 +268,11 @@ func fetchEverythingPackage(c *client.Client, patient map[string]any, uuid strin
 		if ti != tj {
 			return ti < tj
 		}
+		wi, _ := pkg.E[i]["when"].(string)
+		wj, _ := pkg.E[j]["when"].(string)
+		if wi != wj {
+			return wi < wj
+		}
 		idi, _ := pkg.E[i]["id"].(string)
 		idj, _ := pkg.E[j]["id"].(string)
 		return idi < idj
@@ -264,7 +308,9 @@ func fetchEverythingList(
 		return everythingFetchResult{t: typeName, failed: fail}
 	}
 	raw := asSlice(data["results"])
-	truncated := data["truncated"] == true || len(raw) >= cap
+	// GetAll reports truncation honestly (overshoot or a live next link);
+	// len==cap alone is a complete result, not a truncated one.
+	truncated := data["truncated"] == true
 	if len(raw) > cap {
 		raw = raw[:cap]
 		truncated = true
@@ -322,6 +368,26 @@ func compactPatient(rec map[string]any) map[string]any {
 	return e
 }
 
+func compactVisit(rec map[string]any) map[string]any {
+	e := map[string]any{"t": "Visit"}
+	if id := strField(rec, "uuid"); id != "" {
+		e["id"] = id
+	}
+	if typ := output.Extract(rec, "visitType.display"); typ != "" {
+		e["type"] = typ
+	}
+	if loc := output.Extract(rec, "location.display"); loc != "" {
+		e["location"] = loc
+	}
+	if s := output.Extract(rec, "startDatetime"); s != "" {
+		e["start"] = s
+	}
+	if s := output.Extract(rec, "stopDatetime"); s != "" {
+		e["end"] = s
+	}
+	return e
+}
+
 func compactEncounter(rec map[string]any) map[string]any {
 	e := map[string]any{"t": "Encounter"}
 	if id := strField(rec, "uuid"); id != "" {
@@ -335,6 +401,9 @@ func compactEncounter(rec map[string]any) map[string]any {
 	}
 	if loc := output.Extract(rec, "location.display"); loc != "" {
 		e["location"] = loc
+	}
+	if v := output.Extract(rec, "visit.uuid"); v != "" {
+		e["visit"] = v
 	}
 	return e
 }
@@ -352,7 +421,8 @@ func compactObs(rec map[string]any) map[string]any {
 	} else if d := output.Extract(rec, "concept.display|display"); d != "" {
 		e["code"] = map[string]any{"d": d}
 	}
-	if v := compactObsValue(rec["value"]); v != nil {
+	units := strings.TrimSpace(output.Extract(rec, "concept.units"))
+	if v := compactObsValue(rec["value"], units); v != nil {
 		e["value"] = v
 	}
 	if enc := output.Extract(rec, "encounter.uuid"); enc != "" {
@@ -374,8 +444,12 @@ func compactCondition(rec map[string]any) map[string]any {
 	} else if d := output.Extract(rec, "condition.coded.display|condition.nonCoded|display"); d != "" {
 		e["code"] = map[string]any{"d": d}
 	}
-	if when := output.Extract(rec, "onsetDate|dateCreated"); when != "" {
+	// Clinical onset and record-creation time are different facts; never
+	// pass audit metadata off as onset.
+	if when := output.Extract(rec, "onsetDate"); when != "" {
 		e["when"] = when
+	} else if rec2 := output.Extract(rec, "dateCreated"); rec2 != "" {
+		e["recorded"] = rec2
 	}
 	return e
 }
@@ -406,8 +480,10 @@ func compactOrder(rec map[string]any) map[string]any {
 	if d := output.Extract(rec, "display|drug.display|concept.display"); d != "" {
 		e["code"] = map[string]any{"d": d}
 	}
-	if when := output.Extract(rec, "dateActivated|dateCreated"); when != "" {
+	if when := output.Extract(rec, "dateActivated"); when != "" {
 		e["when"] = when
+	} else if rec2 := output.Extract(rec, "dateCreated"); rec2 != "" {
+		e["recorded"] = rec2
 	}
 	// Surface stop/expire when present so callers can interpret "active".
 	if action, _ := rec["action"].(string); action != "" {
@@ -462,35 +538,45 @@ func compactConcept(v any) map[string]any {
 	return out
 }
 
-func compactObsValue(v any) any {
+func compactObsValue(v any, units string) any {
 	if v == nil {
 		return nil
 	}
+	quantity := func(n float64) map[string]any {
+		q := map[string]any{"n": n}
+		if units != "" {
+			q["u"] = units
+		}
+		return q
+	}
 	switch x := v.(type) {
 	case map[string]any:
-		// Coded value
+		// Coded value: keep concept identity, not just the label.
+		code := map[string]any{}
 		if d := output.Extract(x, "display"); d != "" {
-			return map[string]any{"code": map[string]any{"d": d}}
+			code["d"] = d
 		}
 		if u := strField(x, "uuid"); u != "" {
-			return map[string]any{"code": map[string]any{"c": u, "s": "https://openmrs.org/concept"}}
+			code["c"] = u
+			code["s"] = "https://openmrs.org/concept"
 		}
-		return nil
+		if len(code) == 0 {
+			return nil
+		}
+		return map[string]any{"code": code}
 	case float64:
-		return map[string]any{"n": x}
+		return quantity(x)
 	case float32:
-		return map[string]any{"n": float64(x)}
+		return quantity(float64(x))
 	case int:
-		return map[string]any{"n": float64(x)}
+		return quantity(float64(x))
 	case int64:
-		return map[string]any{"n": float64(x)}
+		return quantity(float64(x))
 	case bool:
 		return map[string]any{"b": x}
 	case string:
-		// Numeric string?
-		if f, err := strconv.ParseFloat(x, 64); err == nil {
-			return map[string]any{"n": f}
-		}
+		// Text obs stay text: a value_text of "10" is not a number,
+		// and coercing it corrupts the record's type.
 		if x == "" {
 			return nil
 		}
@@ -587,6 +673,7 @@ func displayFromCode(v any) string {
 }
 
 func init() {
+	patientEverythingCmd.Flags().IntVar(&everythingCapVisit, "cap-visit", everythingVisitCap, "max visits")
 	patientEverythingCmd.Flags().IntVar(&everythingCapEnc, "cap-encounter", everythingEncCap, "max encounters")
 	patientEverythingCmd.Flags().IntVar(&everythingCapObs, "cap-obs", everythingObsCap, "max observations")
 	patientEverythingCmd.Flags().IntVar(&everythingCapOrder, "cap-order", everythingOrderCap, "max drug orders")

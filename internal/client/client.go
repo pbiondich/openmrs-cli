@@ -353,12 +353,19 @@ func (c *Client) GetAllContext(ctx context.Context, path string, params url.Valu
 			totalCount = tc
 		}
 		if len(all) >= capItems {
+			// Reaching the cap exactly, with no further page advertised,
+			// is a complete result — saying "truncated" there is a false
+			// statement agents will act on. Only overshoot or a live next
+			// link means rows were actually left behind.
+			overshoot := len(all) > capItems
 			all = all[:capItems]
-			truncated = true
-			warn, _ := json.Marshal(map[string]string{
-				"warning": fmt.Sprintf("pagination cap (%d) reached; results truncated", capItems),
-			})
-			fmt.Fprintln(os.Stderr, string(warn))
+			if overshoot || nextLink(page) != "" {
+				truncated = true
+				warn, _ := json.Marshal(map[string]string{
+					"warning": fmt.Sprintf("pagination cap (%d) reached; results truncated", capItems),
+				})
+				fmt.Fprintln(os.Stderr, string(warn))
+			}
 			break
 		}
 		next, err := c.sanitizeNextURL(nextLink(page))

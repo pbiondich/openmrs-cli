@@ -183,3 +183,90 @@ func TestFetchEverythingListFailure(t *testing.T) {
 		t.Fatalf("%v", res.failed)
 	}
 }
+
+func TestCompactVisitAndEncounterRef(t *testing.T) {
+	v := compactVisit(map[string]any{
+		"uuid":          "v1",
+		"visitType":     map[string]any{"display": "OPD Visit"},
+		"location":      map[string]any{"display": "Ward A"},
+		"startDatetime": "2026-01-01T08:00:00.000+0000",
+		"stopDatetime":  "2026-01-01T12:00:00.000+0000",
+	})
+	if v["t"] != "Visit" || v["type"] != "OPD Visit" || v["start"] == "" || v["end"] == "" {
+		t.Fatalf("%v", v)
+	}
+	e := compactEncounter(map[string]any{
+		"uuid":  "e1",
+		"visit": map[string]any{"uuid": "v1"},
+	})
+	if e["visit"] != "v1" {
+		t.Fatalf("encounter must carry visit ref: %v", e)
+	}
+	// Pre-visit-era encounter: no ref, no fake one.
+	e2 := compactEncounter(map[string]any{"uuid": "e2"})
+	if _, ok := e2["visit"]; ok {
+		t.Fatal("no visit on server must mean no visit key")
+	}
+}
+
+func TestCompactObsValueUnitsAndNoCoercion(t *testing.T) {
+	// Numeric with units.
+	q := compactObsValue(46.0, "kg")
+	m, _ := q.(map[string]any)
+	if m["n"] != 46.0 || m["u"] != "kg" {
+		t.Fatalf("%v", q)
+	}
+	// Numeric without units: no empty u key.
+	q2, _ := compactObsValue(120.0, "").(map[string]any)
+	if _, ok := q2["u"]; ok {
+		t.Fatal("empty units must be omitted")
+	}
+	// Text obs that looks numeric stays text.
+	s, _ := compactObsValue("10", "").(map[string]any)
+	if s["s"] != "10" {
+		t.Fatalf("text obs coerced: %v", s)
+	}
+	// Coded value keeps concept identity.
+	c, _ := compactObsValue(map[string]any{"uuid": "c1", "display": "Yes"}, "").(map[string]any)
+	code, _ := c["code"].(map[string]any)
+	if code["c"] != "c1" || code["d"] != "Yes" {
+		t.Fatalf("%v", c)
+	}
+}
+
+func TestCompactConditionOnsetVsRecorded(t *testing.T) {
+	withOnset := compactCondition(map[string]any{
+		"uuid": "c1", "onsetDate": "2026-01-01", "dateCreated": "2026-02-15",
+	})
+	if withOnset["when"] != "2026-01-01" {
+		t.Fatalf("%v", withOnset)
+	}
+	if _, ok := withOnset["recorded"]; ok {
+		t.Fatal("recorded must not appear when onset is known")
+	}
+	onlyCreated := compactCondition(map[string]any{
+		"uuid": "c2", "dateCreated": "2026-02-15",
+	})
+	if _, ok := onlyCreated["when"]; ok {
+		t.Fatal("dateCreated must never masquerade as clinical onset")
+	}
+	if onlyCreated["recorded"] != "2026-02-15" {
+		t.Fatalf("%v", onlyCreated)
+	}
+}
+
+func TestRejectUnsupportedGlobals(t *testing.T) {
+	f := rootCmd.PersistentFlags().Lookup("limit")
+	old := f.Changed
+	t.Cleanup(func() { f.Changed = old })
+	f.Changed = true
+	err := rejectUnsupportedGlobals()
+	api, ok := err.(*client.APIError)
+	if !ok || api.Code != client.CodeUsage {
+		t.Fatalf("err=%v", err)
+	}
+	f.Changed = false
+	if err := rejectUnsupportedGlobals(); err != nil {
+		t.Fatal(err)
+	}
+}

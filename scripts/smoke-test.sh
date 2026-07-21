@@ -106,6 +106,27 @@ sys.exit(0 if "uuid" in d and "person" not in d else 1)'; then
   fi
 
   check_exit "unknown --sections is usage error" 1 patient summary "$SUMMARY_UUID" --sections bogus-section
+
+  # patient everything: package shape, honest truncation, rejected globals
+  if "$OMRS" patient everything "$SUMMARY_UUID" --json 2>/dev/null | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+n = d.get("n", {})
+ok = d.get("kind") == "everything" and n.get("Patient") == 1 and "Visit" in n and "Encounter" in n
+sys.exit(0 if ok else 1)'; then
+    echo "PASS: patient everything shape"; PASS=$((PASS + 1))
+  else
+    echo "FAIL: patient everything shape"; FAIL=$((FAIL + 1))
+  fi
+  if "$OMRS" patient everything "$SUMMARY_UUID" --cap-obs 1 --json 2>/dev/null | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+sys.exit(0 if (d.get("truncated") is True or d.get("n", {}).get("Observation", 0) <= 1) else 1)'; then
+    echo "PASS: everything cap sets truncated"; PASS=$((PASS + 1))
+  else
+    echo "FAIL: everything cap sets truncated"; FAIL=$((FAIL + 1))
+  fi
+  check_exit "everything rejects --limit" 1 patient everything "$SUMMARY_UUID" --limit 3
 else
   echo "FAIL: patient summary (could not resolve test patient)"; FAIL=$((FAIL + 1))
 fi
