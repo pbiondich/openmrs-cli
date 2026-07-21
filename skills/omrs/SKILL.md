@@ -86,6 +86,17 @@ For one patient, **do not** hand-assemble a chart from many calls unless the use
 omrs patient summary <identifier-or-uuid> --json
 ```
 
+When summary is incomplete, high-stakes, or the site looks nonstandard, escalate:
+
+```bash
+omrs patient everything <identifier-or-uuid> --json
+```
+
+`everything` is a capped REST composite package (`kind: everything`, compact
+typed `e[]` entries). High recall, less clinical filtering than summary.
+Read `truncated` and `failed` before treating it as complete. See
+`docs/json-output.md`. Not a formal FHIR `$everything` or community standard.
+
 Resolution order: UUID → exact identifier match → unique name. Ambiguous refs exit 5 with candidates in `detail`.
 
 Read JSON in this order:

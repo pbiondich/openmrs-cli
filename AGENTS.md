@@ -63,7 +63,13 @@ The dedicated commands (`patient`, `encounter`, `obs`, `concept`, `visit`,
 For a full clinical picture of one patient, prefer
 `omrs patient summary <identifier-or-uuid> --json` over assembling it
 yourself: it fans out REST and FHIR queries in parallel and returns
-IPS-aligned sections. Resolution order is UUID, then exact identifier=
+IPS-aligned sections. For a high-recall, capped REST package (compact
+typed entries — not a curated chart), use
+`omrs patient everything <identifier-or-uuid> --json` (see
+`docs/json-output.md`). Prefer summary first; escalate to everything when
+sections are incomplete or the question needs more of the site's raw data.
+
+Resolution order is UUID, then exact identifier=
 lookup, then fuzzy name search; an ambiguous reference errors with the
 candidates listed. Read the top-level `counts`
 object first: it gives every section's item count up front when the

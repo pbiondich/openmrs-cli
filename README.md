@@ -37,6 +37,7 @@ omrs login -s https://your-openmrs.example.org/openmrs -u youruser
 # or: omrs login -s http://localhost/openmrs -u admin
 omrs whoami
 omrs patient summary <id>
+omrs patient everything <id> --json   # compact REST package (see docs/json-output.md)
 omrs concept search "malaria"
 omrs encounter list --patient <uuid> --since 30d
 omrs obs list --patient <uuid> --since 2026-01-01 --until yesterday --all
@@ -139,7 +140,7 @@ go build ./... && go vet ./... && go test ./...   # build + unit tests
 
 The dependency list is deliberately small (cobra, x/term, go-keyring) and I'd like to keep it that way: a tool that touches patient data should be auditable in an afternoon.
 
-Agent and contributor contracts live in [`AGENTS.md`](AGENTS.md). A portable skill for coding agents that *use* `omrs` against a server is in [`skills/omrs/SKILL.md`](skills/omrs/SKILL.md).
+Agent and contributor contracts live in [`AGENTS.md`](AGENTS.md). A portable skill for coding agents that *use* `omrs` against a server is in [`skills/omrs/SKILL.md`](skills/omrs/SKILL.md). Design notes for JSON shapes (summary vs everything, compact entries) are in [`docs/json-output.md`](docs/json-output.md).
 
 ## License
 
