@@ -27,17 +27,18 @@ var Version = "dev"
 const PaginationCap = 5000
 
 var flags struct {
-	server   string
-	user     string
-	profile  string
-	jsonOut  bool
-	tableOut bool
-	full     bool
-	ref      bool
-	fields   string
-	limit    int
-	start    int
-	all      bool
+	server            string
+	user              string
+	profile           string
+	jsonOut           bool
+	tableOut          bool
+	full              bool
+	ref               bool
+	fields            string
+	limit             int
+	start             int
+	all               bool
+	allowInsecureHTTP bool
 }
 
 var rootCmd = &cobra.Command{
@@ -81,6 +82,14 @@ func init() {
 	pf.IntVarP(&flags.limit, "limit", "l", 25, "results per page")
 	pf.IntVar(&flags.start, "start", 0, "start index for pagination")
 	pf.BoolVar(&flags.all, "all", false, fmt.Sprintf("fetch all pages (cap %d)", PaginationCap))
+	pf.BoolVar(&flags.allowInsecureHTTP, "allow-insecure-http", false, "allow cleartext HTTP to non-loopback hosts (also OMRS_ALLOW_INSECURE_HTTP=1); not for production")
+
+	// Apply insecure-HTTP policy before any command runs NormalizeServerURL.
+	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
+		if flags.allowInsecureHTTP {
+			config.SetAllowInsecureHTTP(true)
+		}
+	}
 }
 
 // Execute runs the CLI and returns the process exit code.
@@ -101,7 +110,7 @@ func wrapResolveError(err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, config.ErrCredentialStore) {
+	if errors.Is(err, config.ErrCredentialStore) || errors.Is(err, config.ErrCredentialOrigin) {
 		return &client.APIError{Message: err.Error(), Code: client.CodeAuth}
 	}
 	return err

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"strings"
 	"time"
 
@@ -72,53 +73,80 @@ type Client struct {
 }
 
 // New builds a client with a default 30s per-request timeout and
-// same-origin redirect policy (blocks redirect-based SSRF).
+// same-origin + API-path redirect policy (blocks redirect-based SSRF).
 func New(r config.Resolved) *Client {
-	return NewWithHTTP(r, defaultHTTPClient())
+	return NewWithHTTP(r, nil)
 }
 
 // NewWithHTTP builds a client with a custom HTTP client (tests, custom transport).
-// If hc is nil, defaultHTTPClient is used. If hc is non-nil but has no
-// CheckRedirect, same-origin redirect policy is installed.
+// If hc is nil, a default client is used. If hc is non-nil but has no
+// CheckRedirect, a policy bound to this client's base URL is installed
+// (same origin + REST/FHIR API path only).
 func NewWithHTTP(r config.Resolved, hc *http.Client) *Client {
-	if hc == nil {
-		hc = defaultHTTPClient()
-	} else if hc.CheckRedirect == nil {
-		// Copy so we don't mutate a shared client unexpectedly.
-		cp := *hc
-		cp.CheckRedirect = sameOriginRedirect
-		hc = &cp
-	}
-	return &Client{
+	c := &Client{
 		baseURL: strings.TrimRight(r.URL, "/"),
 		user:    r.User,
 		pass:    r.Password,
-		http:    hc,
 	}
+	if hc == nil {
+		hc = &http.Client{Timeout: defaultTimeout}
+	} else {
+		// Copy so we don't mutate a shared client unexpectedly.
+		cp := *hc
+		hc = &cp
+	}
+	if hc.CheckRedirect == nil {
+		hc.CheckRedirect = c.redirectPolicy()
+	}
+	c.http = hc
+	return c
 }
 
-func defaultHTTPClient() *http.Client {
-	return &http.Client{
-		Timeout:       defaultTimeout,
-		CheckRedirect: sameOriginRedirect,
-	}
-}
-
-// sameOriginRedirect refuses cross-host/scheme redirects so a 302 cannot
-// pivot Basic Auth traffic (or the request itself) to an attacker or
-// cloud-metadata address. Same-origin redirects remain allowed.
-func sameOriginRedirect(req *http.Request, via []*http.Request) error {
-	if len(via) >= 10 {
-		return errors.New("stopped after 10 redirects")
-	}
-	if len(via) == 0 {
+// redirectPolicy refuses cross-host/scheme redirects and same-host pivots
+// outside OpenMRS REST/FHIR API paths so Basic Auth cannot ride a 302 to
+// admin/actuator endpoints.
+func (c *Client) redirectPolicy() func(req *http.Request, via []*http.Request) error {
+	base, _ := url.Parse(c.baseURL)
+	return func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		if len(via) == 0 {
+			return nil
+		}
+		orig := via[0].URL
+		if !strings.EqualFold(req.URL.Scheme, orig.Scheme) || !strings.EqualFold(req.URL.Host, orig.Host) {
+			return fmt.Errorf("refusing off-origin redirect to %s", req.URL.Host)
+		}
+		basePath := ""
+		if base != nil {
+			basePath = base.Path
+		}
+		if !isAllowedAPIPath(basePath, req.URL.Path) {
+			return fmt.Errorf("refusing redirect outside OpenMRS REST/FHIR API path (%s)", req.URL.Path)
+		}
 		return nil
 	}
-	orig := via[0].URL
-	if !strings.EqualFold(req.URL.Scheme, orig.Scheme) || !strings.EqualFold(req.URL.Host, orig.Host) {
-		return fmt.Errorf("refusing off-origin redirect to %s", req.URL.Host)
+}
+
+// isAllowedAPIPath reports whether reqPath stays under basePath/ws/rest or
+// basePath/ws/fhir2 after path.Clean (so .. cannot escape into /admin).
+func isAllowedAPIPath(basePath, reqPath string) bool {
+	basePath = path.Clean("/" + strings.Trim(basePath, "/"))
+	if basePath == "/" {
+		basePath = ""
 	}
-	return nil
+	reqPath = path.Clean("/" + strings.TrimPrefix(reqPath, "/"))
+	if strings.Contains(reqPath, "..") {
+		return false
+	}
+	for _, seg := range []string{"/ws/rest", "/ws/fhir2"} {
+		prefix := path.Clean(basePath + seg)
+		if reqPath == prefix || strings.HasPrefix(reqPath, prefix+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // WithContext returns a shallow copy that uses ctx for subsequent requests.
@@ -379,14 +407,15 @@ func (c *Client) sanitizeNextURL(next string) (string, error) {
 			Code:    CodeBadRequest,
 		}
 	}
-	// Keep next links under OpenMRS API paths so same-host pivots to
-	// admin/actuator URLs do not ride Basic Auth.
-	if !strings.Contains(u.Path, "/ws/rest/") && !strings.Contains(u.Path, "/ws/fhir2/") {
+	// path.Clean so .. cannot escape; require prefix under base/ws/rest or base/ws/fhir2.
+	if !isAllowedAPIPath(base.Path, u.Path) {
 		return "", &APIError{
 			Message: "refusing pagination next link outside OpenMRS REST/FHIR API path",
 			Code:    CodeBadRequest,
 		}
 	}
+	// Return the cleaned path form so callers follow a canonical URL.
+	u.Path = path.Clean(u.Path)
 	return u.String(), nil
 }
 

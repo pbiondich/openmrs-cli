@@ -39,10 +39,16 @@ func TestNormalizeServerURL(t *testing.T) {
 	if _, err := NormalizeServerURL("http://localhost/openmrs"); err != nil {
 		t.Fatal(err)
 	}
-	// remote http is allowed but warns (we only check no error)
+	// remote http refused by default
+	if _, err := NormalizeServerURL("http://example.com/openmrs"); err == nil {
+		t.Fatal("remote cleartext HTTP must fail without allow")
+	}
+	t.Cleanup(func() { SetAllowInsecureHTTP(false) })
+	SetAllowInsecureHTTP(true)
 	if _, err := NormalizeServerURL("http://example.com/openmrs"); err != nil {
 		t.Fatal(err)
 	}
+	SetAllowInsecureHTTP(false)
 }
 
 func TestDefaultHasNoPasswords(t *testing.T) {
@@ -142,6 +148,122 @@ func TestResolveNoSilentDefaultPassword(t *testing.T) {
 	}
 	if res.URL != DefaultURL {
 		t.Fatalf("url=%q", res.URL)
+	}
+}
+
+func TestOriginKey(t *testing.T) {
+	a, err := OriginKey("https://Demo.Example/openmrs/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := OriginKey("https://demo.example/openmrs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a != b {
+		t.Fatalf("path/case should not matter: %q vs %q", a, b)
+	}
+	c, err := OriginKey("http://demo.example/openmrs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == c {
+		t.Fatal("http vs https must differ")
+	}
+	d, err := OriginKey("https://evil.example/openmrs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == d {
+		t.Fatal("hosts must differ")
+	}
+}
+
+func TestResolveRefusesProfilePasswordForDifferentOrigin(t *testing.T) {
+	withTempConfig(t, &Config{
+		DefaultProfile: "prod",
+		Profiles: map[string]Profile{
+			"prod": {URL: "https://hospital.example/openmrs", User: "nurse", Password: "secret-pw"},
+		},
+	})
+
+	// Same origin (path differ) still uses the stored password.
+	res, err := Resolve(Overrides{Server: "https://hospital.example/openmrs/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Password != "secret-pw" || res.URL != "https://hospital.example/openmrs" {
+		t.Fatalf("%+v", res)
+	}
+
+	// Different host: must not attach the profile password.
+	_, err = Resolve(Overrides{Server: "https://attacker.example/openmrs"})
+	if err == nil {
+		t.Fatal("expected origin binding error")
+	}
+	if !errors.Is(err, ErrCredentialOrigin) {
+		t.Fatalf("err=%v want ErrCredentialOrigin", err)
+	}
+
+	// Env server override is the same attack path.
+	t.Setenv("OMRS_SERVER", "https://attacker.example/openmrs")
+	_, err = Resolve(Overrides{})
+	if !errors.Is(err, ErrCredentialOrigin) {
+		t.Fatalf("env override: err=%v", err)
+	}
+	t.Setenv("OMRS_SERVER", "")
+
+	// Invocation-scoped password may target any host.
+	res, err = Resolve(Overrides{Server: "https://attacker.example/openmrs", Password: "oneshot"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Password != "oneshot" {
+		t.Fatalf("%+v", res)
+	}
+
+	t.Setenv("OMRS_PASSWORD", "fromenv")
+	res, err = Resolve(Overrides{Server: "https://other.example/openmrs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Password != "fromenv" {
+		t.Fatalf("%+v", res)
+	}
+}
+
+func TestResolveKeychainPasswordOriginBound(t *testing.T) {
+	// secrets package: use MockInit from a small integration via real keyring
+	// only when available — instead store password in file field to cover
+	// the same binding path as keychain success (origin check is shared).
+	// Keychain path with successful Get is exercised when mock is used from
+	// cli tests; here we assert file-password origin bind which uses the
+	// same branch after profilePassword is set.
+	withTempConfig(t, &Config{
+		DefaultProfile: "local",
+		Profiles: map[string]Profile{
+			"local": {URL: "http://localhost/openmrs", User: "admin", Password: "local-secret"},
+		},
+	})
+	_, err := Resolve(Overrides{Server: "http://127.0.0.1/openmrs"})
+	// localhost vs 127.0.0.1 are different hosts → refuse
+	if !errors.Is(err, ErrCredentialOrigin) {
+		t.Fatalf("loopback name vs IP should not share credentials: err=%v", err)
+	}
+	res, err := Resolve(Overrides{Server: "http://localhost:80/openmrs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Password != "local-secret" {
+		t.Fatalf("%+v", res)
+	}
+}
+
+func TestClearProfileSecrets(t *testing.T) {
+	p := Profile{URL: "https://a.example/openmrs", Password: "x", PasswordStore: "keychain"}
+	ClearProfileSecrets("any", &p)
+	if p.Password != "" || p.PasswordStore != "" {
+		t.Fatalf("%+v", p)
 	}
 }
 

@@ -96,6 +96,12 @@ echo "$OMRS_PW" | omrs login -s http://localhost/openmrs -u admin --password-std
 
 Passwords never appear on the command line (there is no `-p` flag). Prefer the OS store when it is available; `OMRS_PASSWORD` and `--password-stdin` cover headless CI and agents.
 
+**Origin binding:** a password saved for a profile is only sent to that profile’s server origin (scheme + host + port). `omrs --server https://other.example/openmrs …` does *not* reuse the profile secret for a different host (exit 2 / `AUTH`). For one-shot use against another server, set `OMRS_PASSWORD` (and usually `OMRS_SERVER` / `OMRS_USER`) for that process, or run `omrs login` for a profile aimed at the new URL. Changing a profile’s URL to a different origin clears its stored credentials.
+
+**HTTPS:** cleartext `http://` is allowed only for loopback (`localhost` / `127.0.0.1` / `::1`). Remote HTTP is refused unless you pass `--allow-insecure-http` or set `OMRS_ALLOW_INSECURE_HTTP=1` (lab networks only; a warning is still printed).
+
+**Where passwords live:** prefer the OS credential store. If it is unavailable, login does **not** write the password into `config.json` unless you opt in with `--store-password-in-config` or `OMRS_ALLOW_CONFIG_PASSWORD=1`. Headless CI should use `OMRS_PASSWORD` instead of a saved profile secret.
+
 One library-level caveat on macOS: [go-keyring](https://github.com/zalando/go-keyring) stores secrets via the `security` CLI rather than the Keychain API with an ACL prompt. In practice, **any process running as your user can often read the stored password without a Keychain unlock dialog**. That is weaker than the “app-bound Keychain item” model people sometimes assume. Linux Secret Service and Windows Credential Manager have their own trust models too. Treat a logged-in shell as trusted, use short-lived env credentials when you can, and `omrs logout` when you are done with a profile.
 
 ## For AI agents

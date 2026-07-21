@@ -102,13 +102,28 @@ func TestCompleteLoginFallsBackToConfigFileWhenStoreUnavailable(t *testing.T) {
 	srv := sessionServer(t, true)
 
 	cfg := &config.Config{Profiles: map[string]config.Profile{}}
+	// Without opt-in, keyring failure must not write plaintext password.
+	oldFlag := loginStorePasswordConfig
+	t.Cleanup(func() { loginStorePasswordConfig = oldFlag })
+	loginStorePasswordConfig = false
+	err := completeLogin(cfg, "headless", srv.URL, "bob", "pw", false)
+	if err == nil {
+		t.Fatal("expected error when keyring down and config password not allowed")
+	}
+	api, ok := err.(*client.APIError)
+	if !ok || api.Code != client.CodeAuth {
+		t.Fatalf("want AUTH, got %v", err)
+	}
+
+	loginStorePasswordConfig = true
+	cfg = &config.Config{Profiles: map[string]config.Profile{}}
 	if err := completeLogin(cfg, "headless", srv.URL, "bob", "pw", false); err != nil {
 		t.Fatal(err)
 	}
 	saved, _ := config.Load()
 	p := saved.Profiles["headless"]
 	if p.Password != "pw" || p.PasswordStore != "" {
-		t.Fatalf("expected config-file fallback, got %+v", p)
+		t.Fatalf("expected config-file fallback with opt-in, got %+v", p)
 	}
 }
 

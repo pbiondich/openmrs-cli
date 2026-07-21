@@ -31,6 +31,11 @@ const (
 // but the secret cannot be read and no flag/env password was supplied.
 var ErrCredentialStore = errors.New("credential store")
 
+// ErrCredentialOrigin is returned when a profile-stored password would be
+// sent to a server origin other than the profile's. Stored secrets are
+// origin-bound; use OMRS_PASSWORD (or re-login) for a different host.
+var ErrCredentialOrigin = errors.New("credential origin")
+
 type Profile struct {
 	URL      string `json:"url"`
 	User     string `json:"user,omitempty"`
@@ -127,9 +132,52 @@ func Save(cfg *Config) error {
 	return os.Chmod(path, 0o600)
 }
 
+// insecureHTTPAllowed is set by the CLI --allow-insecure-http flag.
+// Env OMRS_ALLOW_INSECURE_HTTP=1|true|yes also permits cleartext remote HTTP.
+var insecureHTTPAllowed bool
+
+// SetAllowInsecureHTTP toggles cleartext HTTP to non-loopback hosts (tests + CLI flag).
+func SetAllowInsecureHTTP(v bool) { insecureHTTPAllowed = v }
+
+// AllowInsecureHTTP reports whether non-loopback http:// URLs are permitted.
+func AllowInsecureHTTP() bool {
+	if insecureHTTPAllowed {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("OMRS_ALLOW_INSECURE_HTTP"))) {
+	case "1", "true", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
+// AllowConfigPassword reports whether a password may be written into
+// config.json when the OS credential store is unavailable.
+// Default is false; opt in with OMRS_ALLOW_CONFIG_PASSWORD=1|true|yes
+// or the CLI --store-password-in-config flag (via SetAllowConfigPassword).
+var configPasswordAllowed bool
+
+// SetAllowConfigPassword toggles config-file password storage (tests + CLI flag).
+func SetAllowConfigPassword(v bool) { configPasswordAllowed = v }
+
+// ConfigPasswordAllowed reports whether plaintext config password storage is allowed.
+func ConfigPasswordAllowed() bool {
+	if configPasswordAllowed {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("OMRS_ALLOW_CONFIG_PASSWORD"))) {
+	case "1", "true", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
 // NormalizeServerURL validates and normalizes an OpenMRS base URL.
 // Rejects non-http(s) schemes and embedded userinfo (credentials in the URL).
-// Cleartext HTTP to a non-loopback host emits a stderr warning.
+// Cleartext HTTP to a non-loopback host is refused unless AllowInsecureHTTP
+// (flag or OMRS_ALLOW_INSECURE_HTTP); when allowed, a stderr warning is still emitted.
 func NormalizeServerURL(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -149,6 +197,9 @@ func NormalizeServerURL(raw string) (string, error) {
 		return "", fmt.Errorf("server URL missing host")
 	}
 	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
+		if !AllowInsecureHTTP() {
+			return "", fmt.Errorf("refusing cleartext HTTP to non-local host %q; use https, or set OMRS_ALLOW_INSECURE_HTTP=1 / --allow-insecure-http for lab networks only", u.Hostname())
+		}
 		warnJSON("using cleartext HTTP to a non-local host; credentials will be sent unencrypted")
 	}
 	return strings.TrimRight(raw, "/"), nil
@@ -165,7 +216,69 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// OriginKey returns a stable scheme|host|port identity for credential
+// binding. Paths are ignored so https://host/openmrs and
+// https://host/openmrs/ match. Host comparison is case-insensitive;
+// default ports 80/443 are normalized.
+func OriginKey(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("empty server URL")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid server URL: %w", err)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", fmt.Errorf("server URL must use http or https, got %q", u.Scheme)
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return "", fmt.Errorf("server URL missing host")
+	}
+	port := u.Port()
+	if port == "" {
+		if scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	return scheme + "|" + host + "|" + port, nil
+}
+
+// SameOrigin reports whether two OpenMRS base URLs share scheme/host/port.
+func SameOrigin(a, b string) (bool, error) {
+	ka, err := OriginKey(a)
+	if err != nil {
+		return false, err
+	}
+	kb, err := OriginKey(b)
+	if err != nil {
+		return false, err
+	}
+	return ka == kb, nil
+}
+
+// ClearProfileSecrets removes any stored password for a profile (keychain
+// and/or config-file field). Used when the profile URL origin changes so
+// a secret cannot ride along to a new host.
+func ClearProfileSecrets(name string, p *Profile) {
+	if p == nil {
+		return
+	}
+	_ = secrets.Delete(name)
+	p.Password = ""
+	p.PasswordStore = ""
+}
+
 // Resolve applies precedence: flags > env > named profile > defaultProfile > built-ins.
+//
+// Stored profile passwords (keychain or config file) are origin-bound: they
+// are only used when the final server URL shares scheme/host/port with the
+// profile URL. Invocation-scoped passwords (OMRS_PASSWORD / Overrides.Password)
+// may be sent to any URL the caller chose for this process.
 func Resolve(o Overrides) (Resolved, error) {
 	cfg, err := Load()
 	if err != nil {
@@ -185,8 +298,9 @@ func Resolve(o Overrides) (Resolved, error) {
 		profileName = cfg.DefaultProfile
 	}
 
-	// Track whether the profile expected a keychain entry so a missing
-	// secret can hard-fail after flag/env overrides are considered.
+	// Profile secret is held separately until we know the final URL origin.
+	var profileURL string
+	var profilePassword string
 	keychainProfile := ""
 	var keychainReadErr error
 	if profileName != "" {
@@ -200,6 +314,7 @@ func Resolve(o Overrides) (Resolved, error) {
 			res.Profile = profileName
 			if p.URL != "" {
 				res.URL = p.URL
+				profileURL = p.URL
 			}
 			if p.User != "" {
 				res.User = p.User
@@ -209,7 +324,7 @@ func Resolve(o Overrides) (Resolved, error) {
 				pw, err := secrets.Get(profileName)
 				switch {
 				case err == nil:
-					res.Password = pw
+					profilePassword = pw
 				case errors.Is(err, secrets.ErrNotFound):
 					// Leave empty; hard-fail below if still unset after overrides.
 				default:
@@ -219,7 +334,7 @@ func Resolve(o Overrides) (Resolved, error) {
 					keychainReadErr = err
 				}
 			} else if p.Password != "" {
-				res.Password = p.Password
+				profilePassword = p.Password
 			}
 		}
 	}
@@ -230,18 +345,49 @@ func Resolve(o Overrides) (Resolved, error) {
 	if v := os.Getenv("OMRS_USER"); v != "" {
 		res.User = v
 	}
-	if v := os.Getenv("OMRS_PASSWORD"); v != "" {
-		res.Password = v
-	}
-
 	if o.Server != "" {
 		res.URL = o.Server
 	}
 	if o.User != "" {
 		res.User = o.User
 	}
+
+	// Invocation-scoped password (env or internal override) is not
+	// origin-bound: the caller supplied it for this process.
+	invocationPassword := ""
+	if v := os.Getenv("OMRS_PASSWORD"); v != "" {
+		invocationPassword = v
+	}
 	if o.Password != "" {
-		res.Password = o.Password
+		invocationPassword = o.Password
+	}
+
+	norm, err := NormalizeServerURL(res.URL)
+	if err != nil {
+		return Resolved{}, err
+	}
+	res.URL = norm
+
+	if invocationPassword != "" {
+		res.Password = invocationPassword
+	} else if profilePassword != "" {
+		if profileURL == "" {
+			return Resolved{}, fmt.Errorf("%w: profile %q has credentials but no server URL; run 'omrs login' or set OMRS_PASSWORD",
+				ErrCredentialOrigin, profileName)
+		}
+		profNorm, err := NormalizeServerURL(profileURL)
+		if err != nil {
+			return Resolved{}, err
+		}
+		same, err := SameOrigin(profNorm, res.URL)
+		if err != nil {
+			return Resolved{}, err
+		}
+		if !same {
+			return Resolved{}, fmt.Errorf("%w: refusing to send credentials for profile %q to a different server (profile is %s; request targets %s). Run 'omrs login' for the new server, or set OMRS_PASSWORD for one-shot use",
+				ErrCredentialOrigin, profileName, profNorm, res.URL)
+		}
+		res.Password = profilePassword
 	}
 
 	// Profile said keychain but we still have no password after all
@@ -254,12 +400,6 @@ func Resolve(o Overrides) (Resolved, error) {
 		return Resolved{}, fmt.Errorf("%w: profile %q expects a credential-store entry but none was found; run 'omrs login' or set OMRS_PASSWORD",
 			ErrCredentialStore, keychainProfile)
 	}
-
-	norm, err := NormalizeServerURL(res.URL)
-	if err != nil {
-		return Resolved{}, err
-	}
-	res.URL = norm
 
 	return res, nil
 }

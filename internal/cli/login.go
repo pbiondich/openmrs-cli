@@ -18,8 +18,9 @@ import (
 )
 
 var (
-	loginPasswordStdin bool
-	loginDemo          bool
+	loginPasswordStdin       bool
+	loginDemo                bool
+	loginStorePasswordConfig bool
 )
 
 var loginCmd = &cobra.Command{
@@ -30,9 +31,11 @@ the credentials against the server, and saves them to a profile.
 
 The password is stored in the OS credential store — macOS Keychain,
 Windows Credential Manager, or Secret Service (GNOME Keyring / KWallet)
-on Linux — falling back to the config file (mode 0600) on headless
-systems with no keyring. It is never echoed and never appears in
-shell history.
+on Linux. It is never echoed and never appears in shell history.
+
+If the OS store is unavailable, login fails unless you opt in to config-file
+storage with --store-password-in-config or OMRS_ALLOW_CONFIG_PASSWORD=1
+(or use OMRS_PASSWORD for the session without saving).
 
 For the public OpenMRS demo sandbox (no prompts):
   omrs login --demo
@@ -167,13 +170,9 @@ func completeLogin(cfg *config.Config, profileName, serverURL, username, passwor
 	}
 
 	p := config.Profile{URL: serverURL, User: username}
-	storage := secrets.StoreName()
-	if err := secrets.Set(profileName, password); err != nil {
-		output.Warn("OS credential store unavailable (%v); storing password in config file", err)
-		p.Password = password
-		storage = "config file"
-	} else {
-		p.PasswordStore = "keychain"
+	storage, err := storeProfilePassword(profileName, &p, password, loginStorePasswordConfig)
+	if err != nil {
+		return err
 	}
 	cfg.Profiles[profileName] = p
 	if setDefault || cfg.DefaultProfile == "" {
@@ -273,8 +272,29 @@ func promptDefault(r *bufio.Reader, prompt, def string) string {
 	return line
 }
 
+// storeProfilePassword writes a password to the OS credential store.
+// Config-file storage is refused unless allowConfig or config.ConfigPasswordAllowed().
+func storeProfilePassword(profileName string, p *config.Profile, password string, allowConfig bool) (storageLabel string, err error) {
+	if err := secrets.Set(profileName, password); err != nil {
+		if !allowConfig && !config.ConfigPasswordAllowed() {
+			return "", &client.APIError{
+				Message: fmt.Sprintf("OS credential store unavailable (%v); refusing to write password to config file. Use OMRS_PASSWORD for this session, or pass --store-password-in-config / set OMRS_ALLOW_CONFIG_PASSWORD=1", err),
+				Code:    client.CodeAuth,
+			}
+		}
+		output.Warn("OS credential store unavailable (%v); storing password in config file", err)
+		p.Password = password
+		p.PasswordStore = ""
+		return "config file", nil
+	}
+	p.Password = ""
+	p.PasswordStore = "keychain"
+	return secrets.StoreName(), nil
+}
+
 func init() {
 	loginCmd.Flags().BoolVar(&loginPasswordStdin, "password-stdin", false, "read the password from stdin (for scripts and agents)")
 	loginCmd.Flags().BoolVar(&loginDemo, "demo", false, "log in to the public OpenMRS demo sandbox (no password prompt)")
+	loginCmd.Flags().BoolVar(&loginStorePasswordConfig, "store-password-in-config", false, "if the OS credential store is unavailable, store the password in config.json (0600); prefer OMRS_PASSWORD instead")
 	rootCmd.AddCommand(loginCmd, logoutCmd, whoamiCmd)
 }

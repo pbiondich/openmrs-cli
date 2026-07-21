@@ -249,6 +249,40 @@ func TestSanitizeNextURLRejectsNonAPIPath(t *testing.T) {
 	}
 }
 
+func TestSanitizeNextURLRejectsDotDotEscape(t *testing.T) {
+	c := New(config.Resolved{URL: "https://demo.example/openmrs"})
+	// Contains /ws/rest/ as a substring before Clean; after Clean becomes /openmrs/admin.
+	_, err := c.sanitizeNextURL("https://demo.example/openmrs/ws/rest/v1/../../admin")
+	if err == nil {
+		t.Fatal("expected error for .. escape from API path")
+	}
+	// Legitimate relative segment under rest still OK.
+	got, err := c.sanitizeNextURL("https://demo.example/openmrs/ws/rest/v1/patient/../encounter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "/ws/rest/") {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestIsAllowedAPIPath(t *testing.T) {
+	if !isAllowedAPIPath("/openmrs", "/openmrs/ws/rest/v1/patient") {
+		t.Fatal("rest under base")
+	}
+	if !isAllowedAPIPath("/openmrs", "/openmrs/ws/fhir2/R4/Patient") {
+		t.Fatal("fhir under base")
+	}
+	if isAllowedAPIPath("/openmrs", "/openmrs/admin") {
+		t.Fatal("admin must fail")
+	}
+	if isAllowedAPIPath("/openmrs", "/openmrs/ws/rest/v1/../../admin") {
+		// Cleaned form is checked by callers after Clean; this raw path still
+		// has .. until Clean — isAllowedAPIPath cleans internally.
+		t.Fatal("dot-dot escape must fail after clean")
+	}
+}
+
 func TestOffOriginRedirectRefused(t *testing.T) {
 	// First hop 302 to evil host; client must not follow.
 	var hops atomic.Int32

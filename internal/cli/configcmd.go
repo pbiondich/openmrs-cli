@@ -66,9 +66,10 @@ var configShowCmd = &cobra.Command{
 }
 
 var (
-	setProfileURL           string
-	setProfileUser          string
-	setProfilePasswordStdin bool
+	setProfileURL                string
+	setProfileUser               string
+	setProfilePasswordStdin      bool
+	setProfileStorePasswordConfig bool
 )
 
 var configSetProfileCmd = &cobra.Command{
@@ -80,7 +81,10 @@ Prefer omrs login to store a password (OS credential store). To set a
 password without a full login probe, use --password-stdin (never a
 password flag — secrets must not appear in process listings):
 
-  echo "$OMRS_PW" | omrs config set-profile local --url http://localhost/openmrs --user admin --password-stdin`,
+  echo "$OMRS_PW" | omrs config set-profile local --url http://localhost/openmrs --user admin --password-stdin
+
+If the OS store is unavailable, password save fails unless you pass
+--store-password-in-config or set OMRS_ALLOW_CONFIG_PASSWORD=1.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
@@ -89,10 +93,23 @@ password flag — secrets must not appear in process listings):
 			return err
 		}
 		p := cfg.Profiles[name]
+		clearedCreds := false
 		if setProfileURL != "" {
 			norm, err := config.NormalizeServerURL(setProfileURL)
 			if err != nil {
 				return err
+			}
+			// Changing origin must not leave a secret that Resolve would
+			// refuse (or, before origin-binding, would send to the new host).
+			if p.URL != "" && (p.PasswordStore == "keychain" || p.Password != "") {
+				same, err := config.SameOrigin(p.URL, norm)
+				if err != nil {
+					return err
+				}
+				if !same {
+					config.ClearProfileSecrets(name, &p)
+					clearedCreds = true
+				}
 			}
 			p.URL = norm
 		}
@@ -109,16 +126,10 @@ password flag — secrets must not appear in process listings):
 			if password == "" {
 				return fmt.Errorf("no password provided on stdin")
 			}
-			// Prefer keychain; fall back to config file. Clear the other
-			// so there is a single source of truth.
-			if err := secrets.Set(name, password); err != nil {
-				output.Warn("OS credential store unavailable (%v); storing password in config file", err)
-				p.Password = password
-				p.PasswordStore = ""
-			} else {
-				p.Password = ""
-				p.PasswordStore = "keychain"
+			if _, err := storeProfilePassword(name, &p, password, setProfileStorePasswordConfig); err != nil {
+				return err
 			}
+			clearedCreds = false // caller just set a password for the new URL
 		}
 		if p.URL == "" {
 			return fmt.Errorf("--url is required for a new profile")
@@ -137,6 +148,9 @@ password flag — secrets must not appear in process listings):
 			return err
 		}
 		fmt.Printf("Saved profile %q\n", name)
+		if clearedCreds {
+			fmt.Printf("Credentials cleared for %q (server origin changed); run 'omrs login' again.\n", name)
+		}
 		return nil
 	},
 }
@@ -195,6 +209,7 @@ func init() {
 	configSetProfileCmd.Flags().StringVar(&setProfileURL, "url", "", "server URL, e.g. https://dev3.openmrs.org/openmrs")
 	configSetProfileCmd.Flags().StringVar(&setProfileUser, "user", "", "username")
 	configSetProfileCmd.Flags().BoolVar(&setProfilePasswordStdin, "password-stdin", false, "read password from stdin (never put passwords on the command line)")
+	configSetProfileCmd.Flags().BoolVar(&setProfileStorePasswordConfig, "store-password-in-config", false, "if the OS credential store is unavailable, store the password in config.json (0600)")
 	configCmd.AddCommand(configInitCmd, configShowCmd, configSetProfileCmd, configRemoveProfileCmd, configUseCmd)
 	rootCmd.AddCommand(configCmd)
 }

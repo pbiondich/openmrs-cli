@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -25,14 +26,11 @@ func TestRepresentation(t *testing.T) {
 	old := flags
 	t.Cleanup(func() { flags = old })
 
-	flags = struct {
-		server, user, profile string
-		jsonOut, tableOut     bool
-		full, ref             bool
-		fields                string
-		limit, start          int
-		all                   bool
-	}{}
+	flags.server, flags.user, flags.profile = "", "", ""
+	flags.jsonOut, flags.tableOut = false, false
+	flags.full, flags.ref, flags.fields = false, false, ""
+	flags.limit, flags.start, flags.all = 0, 0, false
+	flags.allowInsecureHTTP = false
 
 	if got := representation(); got != "default" {
 		t.Fatalf("default=%q", got)
@@ -88,6 +86,11 @@ func TestWrapResolveError(t *testing.T) {
 	api, ok := err.(*client.APIError)
 	if !ok || api.Code != client.CodeAuth {
 		t.Fatalf("want AUTH APIError, got %v", err)
+	}
+	err = wrapResolveError(fmt.Errorf("%w: refusing …", config.ErrCredentialOrigin))
+	api, ok = err.(*client.APIError)
+	if !ok || api.Code != client.CodeAuth {
+		t.Fatalf("origin bind must be AUTH, got %v", err)
 	}
 }
 

@@ -46,6 +46,17 @@ omrs whoami          # verify; exits 2 if not authenticated
 # Or without login: OMRS_SERVER / OMRS_USER / OMRS_PASSWORD (never -p)
 ```
 
+Stored profile passwords are **origin-bound** (scheme + host + port). Overriding
+the server with `--server` / `OMRS_SERVER` to a different host does **not**
+reuse the profile secret (exit 2, `AUTH`). One-shot cross-host use requires
+`OMRS_PASSWORD` (invocation-scoped) or a new `omrs login`. Changing a profile
+URL to another origin clears its stored credentials.
+
+Cleartext HTTP to non-loopback hosts is refused (use HTTPS, or
+`OMRS_ALLOW_INSECURE_HTTP=1` / `--allow-insecure-http` for labs only). Passwords
+are not written to config.json when the OS keyring fails unless
+`OMRS_ALLOW_CONFIG_PASSWORD=1` / `--store-password-in-config`.
+
 The dedicated commands (`patient`, `encounter`, `obs`, `concept`, `visit`,
 `location`, `user`, `provider`) cover common queries.
 

@@ -47,6 +47,16 @@ omrs whoami
 
 Never use a `-p` / `--password` flag (it does not exist). Never print secrets.
 
+Stored profile passwords are origin-bound. Do **not** expect
+`omrs --server https://other-host/openmrs …` to reuse a profile secret for a
+different host (that is exit 2 / `AUTH` by design). For another server in one
+shot, set `OMRS_SERVER` + `OMRS_USER` + `OMRS_PASSWORD`, or run `omrs login`
+for that URL.
+
+Prefer `https://` servers. Remote `http://` is refused unless
+`OMRS_ALLOW_INSECURE_HTTP=1`. Prefer env passwords in CI over config-file
+password storage.
+
 ## Output and error contract
 
 | Stream | Behavior |
