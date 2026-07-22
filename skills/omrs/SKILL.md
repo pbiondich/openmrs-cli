@@ -15,11 +15,11 @@ You have a dedicated CLI for OpenMRS. Prefer **`omrs`** over raw `curl` for
 REST/FHIR queries: it handles auth profiles, pagination, representation flags,
 TTY vs JSON output, and a stable exit/error contract.
 
-If the binary is missing, install then continue:
+If the binary is missing, install then continue (no Go or brew needed):
 
 ```bash
-go install github.com/pbiondich/openmrs-cli/cmd/omrs@latest
-# or from a checkout: go build -o omrs ./cmd/omrs
+curl -fsSL https://raw.githubusercontent.com/pbiondich/openmrs-cli/main/install.sh | sh
+# with Go instead: go install github.com/pbiondich/openmrs-cli/cmd/omrs@latest
 omrs --help
 ```
 

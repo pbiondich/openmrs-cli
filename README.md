@@ -8,7 +8,22 @@ The idea behind it is simple: is it possible to create a useful CLI for an OpenM
 
 ## Install
 
-With Go installed:
+One line, nothing else required (macOS and Linux):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pbiondich/openmrs-cli/main/install.sh | sh
+```
+
+That detects your platform, downloads the latest release, verifies its
+checksum, and puts `omrs` on your PATH. I watched someone try to install
+this the hard way... they had no Go, no Homebrew, and the binary wasn't on
+their PATH, and each of those is a place to give up. Now it's one command.
+(If piping curl to sh isn't your style, [read the script first](install.sh)...
+it's short, and it only ever downloads from this repo's releases.)
+
+On Windows, grab the `.zip` from the [releases page](https://github.com/pbiondich/openmrs-cli/releases).
+
+If you have Go and prefer it:
 
 ```bash
 go install github.com/pbiondich/openmrs-cli/cmd/omrs@latest
