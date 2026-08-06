@@ -67,25 +67,45 @@ func parseWhen(s string, endOfDay bool) (time.Time, string, error) {
 		"invalid date %q (use YYYY-MM-DD, YYYY-MM-DDTHH:MM, 7d/4w/6m/1y, today, or yesterday)", s)
 }
 
-// obsDatetimeLayouts cover the formats OpenMRS emits for obsDatetime.
+// obsDatetimeLayouts cover formats OpenMRS commonly emits for obsDatetime
+// and similar clinical timestamps. parseServerDatetime also tries RFC3339
+// variants as a fallback.
 var obsDatetimeLayouts = []string{
 	"2006-01-02T15:04:05.000-0700",
+	"2006-01-02T15:04:05.000+0000",
 	"2006-01-02T15:04:05-0700",
+	"2006-01-02T15:04:05+0000",
 	"2006-01-02T15:04:05.000Z07:00",
+	"2006-01-02T15:04:05Z07:00",
+	time.RFC3339Nano,
+	time.RFC3339,
+	"2006-01-02T15:04:05.000Z",
+	"2006-01-02T15:04:05Z",
+	"2006-01-02 15:04:05",
+	"2006-01-02",
 }
 
 // filterResultsByDate keeps results whose dateField falls within
 // [since, until]. Zero bounds are open. Used for resources (obs) whose
 // REST search handler ignores date parameters, so filtering happens
 // client-side after fetch.
+//
+// Rows with a missing or unparseable date are retained (not dropped) and
+// counted in a stderr warning: silently discarding clinical rows on a
+// format mismatch is worse than a slightly wider result set.
 func filterResultsByDate(data map[string]any, dateField string, since, until time.Time) map[string]any {
 	results, _ := data["results"].([]any)
 	kept := make([]any, 0, len(results))
+	unparsed := 0
 	for _, r := range results {
 		rec, _ := r.(map[string]any)
 		raw, _ := rec[dateField].(string)
 		t, ok := parseServerDatetime(raw)
 		if !ok {
+			// Keep: filter bounds cannot be applied honestly; do not hide
+			// the observation from the caller.
+			unparsed++
+			kept = append(kept, r)
 			continue
 		}
 		if !since.IsZero() && t.Before(since) {
@@ -96,11 +116,21 @@ func filterResultsByDate(data map[string]any, dateField string, since, until tim
 		}
 		kept = append(kept, r)
 	}
+	if unparsed > 0 {
+		output.Warn(
+			"%d result(s) had unparseable %s and were retained unfiltered; date bounds may not apply to them",
+			unparsed, dateField,
+		)
+	}
 	data["results"] = kept
 	return data
 }
 
 func parseServerDatetime(s string) (time.Time, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, false
+	}
 	for _, layout := range obsDatetimeLayouts {
 		if t, err := time.Parse(layout, s); err == nil {
 			return t, true

@@ -60,6 +60,12 @@ func TestParseServerDatetime(t *testing.T) {
 	samples := []string{
 		"2026-01-02T14:30:05.000-0500",
 		"2026-01-02T14:30:05-0500",
+		"2026-01-02T14:30:05.000+0000",
+		"2026-01-02T14:30:05Z",
+		"2026-01-02T14:30:05.123Z",
+		"2026-01-02T14:30:05+00:00",
+		"2026-01-02T14:30:05.123456789Z",
+		"2026-01-02",
 	}
 	for _, s := range samples {
 		if _, ok := parseServerDatetime(s); !ok {
@@ -69,6 +75,9 @@ func TestParseServerDatetime(t *testing.T) {
 	if _, ok := parseServerDatetime("garbage"); ok {
 		t.Fatal("expected failure")
 	}
+	if _, ok := parseServerDatetime(""); ok {
+		t.Fatal("empty should fail")
+	}
 }
 
 func TestFilterResultsByDate(t *testing.T) {
@@ -77,18 +86,40 @@ func TestFilterResultsByDate(t *testing.T) {
 			map[string]any{"obsDatetime": "2026-01-01T10:00:00.000-0500", "id": "a"},
 			map[string]any{"obsDatetime": "2026-02-15T10:00:00.000-0500", "id": "b"},
 			map[string]any{"obsDatetime": "2026-03-20T10:00:00.000-0500", "id": "c"},
-			map[string]any{"obsDatetime": "unparseable", "id": "drop"},
+			map[string]any{"obsDatetime": "unparseable", "id": "keep-unparsed"},
 		},
 	}
 	since := time.Date(2026, 2, 1, 0, 0, 0, 0, time.Local)
 	until := time.Date(2026, 3, 1, 23, 59, 59, 0, time.Local)
+
+	// Capture the unparseable-date warning on stderr.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = w
+
 	out := filterResultsByDate(data, "obsDatetime", since, until)
+
+	_ = w.Close()
+	os.Stderr = oldStderr
+	body, _ := io.ReadAll(r)
+
 	got := out["results"].([]any)
-	if len(got) != 1 {
+	// In-range "b" plus retained unparseable row — never silently drop clinical data.
+	if len(got) != 2 {
 		t.Fatalf("got %d results: %v", len(got), got)
 	}
-	if got[0].(map[string]any)["id"] != "b" {
-		t.Fatalf("%v", got[0])
+	ids := map[string]bool{}
+	for _, g := range got {
+		ids[g.(map[string]any)["id"].(string)] = true
+	}
+	if !ids["b"] || !ids["keep-unparsed"] {
+		t.Fatalf("ids=%v", ids)
+	}
+	if !strings.Contains(string(body), "unparseable") {
+		t.Fatalf("expected unparseable-date warning, got %q", body)
 	}
 }
 

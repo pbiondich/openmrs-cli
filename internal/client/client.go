@@ -234,16 +234,24 @@ func (c *Client) Do(ctx context.Context, method, rawURL string, body io.Reader) 
 	return out, nil
 }
 
+// apiSurface selects the OpenMRS API path prefix under the server base.
+type apiSurface int
+
+const (
+	surfaceREST apiSurface = iota // {base}/ws/rest/v1/...
+	surfaceFHIR                   // {base}/ws/fhir2/R4/...
+)
+
 // Get performs a GET against /ws/rest/v1/<path> and decodes the JSON response.
 func (c *Client) Get(path string, params url.Values) (map[string]any, error) {
 	return c.GetContext(c.requestContext(), path, params)
 }
 
 // GetContext is Get with an explicit context.
-func (c *Client) GetContext(ctx context.Context, path string, params url.Values) (map[string]any, error) {
-	u := c.baseURL + "/ws/rest/v1/" + strings.TrimLeft(path, "/")
-	if len(params) > 0 {
-		u += "?" + params.Encode()
+func (c *Client) GetContext(ctx context.Context, resourcePath string, params url.Values) (map[string]any, error) {
+	u, err := c.apiURL(surfaceREST, resourcePath, params)
+	if err != nil {
+		return nil, err
 	}
 	return c.Do(ctx, http.MethodGet, u, nil)
 }
@@ -256,10 +264,10 @@ func (c *Client) GetFHIR(path string, params url.Values) (map[string]any, error)
 }
 
 // GetFHIRContext is GetFHIR with an explicit context.
-func (c *Client) GetFHIRContext(ctx context.Context, path string, params url.Values) (map[string]any, error) {
-	u := c.baseURL + "/ws/fhir2/R4/" + strings.TrimLeft(path, "/")
-	if len(params) > 0 {
-		u += "?" + params.Encode()
+func (c *Client) GetFHIRContext(ctx context.Context, resourcePath string, params url.Values) (map[string]any, error) {
+	u, err := c.apiURL(surfaceFHIR, resourcePath, params)
+	if err != nil {
+		return nil, err
 	}
 	out, err := c.Do(ctx, http.MethodGet, u, nil)
 	if err != nil {
@@ -269,6 +277,113 @@ func (c *Client) GetFHIRContext(ctx context.Context, path string, params url.Val
 		return nil, &APIError{Message: "FHIR server returned an OperationOutcome error", Code: CodeUnknown}
 	}
 	return out, nil
+}
+
+// apiURL builds an absolute request URL under the REST or FHIR API prefix.
+// Resource paths are segment-validated (no "..", no schemes) and the final
+// path is checked with isAllowedAPIPath so Basic Auth cannot leave the API
+// surface via path traversal — same bar as pagination next-link scrubbing.
+func (c *Client) apiURL(surface apiSurface, resourcePath string, params url.Values) (string, error) {
+	base, err := url.Parse(c.baseURL)
+	if err != nil {
+		return "", &APIError{Message: fmt.Sprintf("invalid client base URL: %v", err), Code: CodeBadRequest}
+	}
+	sub, err := cleanResourcePath(resourcePath)
+	if err != nil {
+		return "", err
+	}
+
+	basePath := path.Clean("/" + strings.Trim(base.Path, "/"))
+	if basePath == "/" {
+		basePath = ""
+	}
+	var prefix string
+	switch surface {
+	case surfaceFHIR:
+		prefix = basePath + "/ws/fhir2/R4"
+	default:
+		prefix = basePath + "/ws/rest/v1"
+	}
+	fullPath := prefix
+	if sub != "" {
+		fullPath = prefix + "/" + sub
+	}
+	fullPath = path.Clean("/" + strings.TrimPrefix(fullPath, "/"))
+	if !isAllowedAPIPath(base.Path, fullPath) {
+		return "", &APIError{
+			Message: "refusing request path outside OpenMRS REST/FHIR API",
+			Code:    CodeBadRequest,
+		}
+	}
+
+	u := *base
+	u.Path = fullPath
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.User = nil
+	if len(params) > 0 {
+		u.RawQuery = params.Encode()
+	}
+	return u.String(), nil
+}
+
+// cleanResourcePath normalizes a caller-supplied API subpath (e.g. "patient",
+// "patient/<uuid>/allergy"). Rejects traversal segments, absolute URLs, and
+// query/fragment smuggling — params belong in url.Values, not the path.
+func cleanResourcePath(resourcePath string) (string, error) {
+	resourcePath = strings.TrimSpace(resourcePath)
+	if resourcePath == "" {
+		return "", nil
+	}
+	if strings.Contains(resourcePath, "://") {
+		return "", &APIError{
+			Message: "refusing absolute or scheme-bearing request path",
+			Code:    CodeBadRequest,
+		}
+	}
+	if strings.ContainsAny(resourcePath, "?#") {
+		return "", &APIError{
+			Message: "query or fragment must not appear in the request path; use params",
+			Code:    CodeBadRequest,
+		}
+	}
+	if strings.Contains(resourcePath, "\\") {
+		return "", &APIError{
+			Message: "refusing request path with backslash",
+			Code:    CodeBadRequest,
+		}
+	}
+
+	parts := strings.Split(strings.Trim(resourcePath, "/"), "/")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p == "" {
+			continue
+		}
+		dec, err := url.PathUnescape(p)
+		if err != nil {
+			return "", &APIError{
+				Message: fmt.Sprintf("invalid path segment encoding: %v", err),
+				Code:    CodeBadRequest,
+			}
+		}
+		// Reject "." / ".." in both raw and decoded form so %2e%2e cannot
+		// slip past a string check that only looks for literal dots.
+		if p == "." || p == ".." || dec == "." || dec == ".." {
+			return "", &APIError{
+				Message: "refusing request path with . or .. segments",
+				Code:    CodeBadRequest,
+			}
+		}
+		if strings.Contains(dec, "\\") || strings.Contains(dec, "/") {
+			return "", &APIError{
+				Message: "refusing request path with encoded path separators",
+				Code:    CodeBadRequest,
+			}
+		}
+		out = append(out, p)
+	}
+	return strings.Join(out, "/"), nil
 }
 
 // apiErrorFromResponse maps HTTP status to error codes and surfaces the
@@ -315,10 +430,10 @@ func (c *Client) GetAll(path string, params url.Values, capItems int) (map[strin
 }
 
 // GetAllContext is GetAll with an explicit context (checked between pages).
-func (c *Client) GetAllContext(ctx context.Context, path string, params url.Values, capItems int) (map[string]any, error) {
-	u := c.baseURL + "/ws/rest/v1/" + strings.TrimLeft(path, "/")
-	if len(params) > 0 {
-		u += "?" + params.Encode()
+func (c *Client) GetAllContext(ctx context.Context, resourcePath string, params url.Values, capItems int) (map[string]any, error) {
+	u, err := c.apiURL(surfaceREST, resourcePath, params)
+	if err != nil {
+		return nil, err
 	}
 
 	var all []any

@@ -283,6 +283,101 @@ func TestIsAllowedAPIPath(t *testing.T) {
 	}
 }
 
+func TestCleanResourcePath(t *testing.T) {
+	ok, err := cleanResourcePath("patient/abc-def")
+	if err != nil || ok != "patient/abc-def" {
+		t.Fatalf("got %q err=%v", ok, err)
+	}
+	// Leading/trailing slashes and empties collapse.
+	ok, err = cleanResourcePath("/patient//x/")
+	if err != nil || ok != "patient/x" {
+		t.Fatalf("got %q err=%v", ok, err)
+	}
+	for _, bad := range []string{
+		"../admin",
+		"session/../../../admin",
+		"patient/../../ws/admin",
+		"%2e%2e/admin",
+		"session/%2e%2e/%2e%2e/admin",
+		"http://evil.example/x",
+		"patient?q=john",
+		"patient#frag",
+		`patient\..\admin`,
+	} {
+		if _, err := cleanResourcePath(bad); err == nil {
+			t.Errorf("expected reject for %q", bad)
+		}
+	}
+}
+
+func TestAPIURLRejectsTraversal(t *testing.T) {
+	c := New(config.Resolved{URL: "https://demo.example/openmrs"})
+	for _, p := range []string{
+		"../admin",
+		"session/../../../admin",
+		"%2e%2e/admin",
+		"http://evil.example/",
+	} {
+		if _, err := c.apiURL(surfaceREST, p, nil); err == nil {
+			t.Errorf("apiURL REST accepted %q", p)
+		}
+		if _, err := c.apiURL(surfaceFHIR, p, nil); err == nil {
+			t.Errorf("apiURL FHIR accepted %q", p)
+		}
+	}
+}
+
+func TestAPIURLHappyPath(t *testing.T) {
+	c := New(config.Resolved{URL: "https://demo.example/openmrs"})
+	u, err := c.apiURL(surfaceREST, "patient/uuid-1", url.Values{"v": {"full"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u != "https://demo.example/openmrs/ws/rest/v1/patient/uuid-1?v=full" {
+		t.Fatalf("rest url=%q", u)
+	}
+	u, err = c.apiURL(surfaceFHIR, "Observation", url.Values{"_count": {"10"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u != "https://demo.example/openmrs/ws/fhir2/R4/Observation?_count=10" {
+		t.Fatalf("fhir url=%q", u)
+	}
+}
+
+func TestGetRejectsPathTraversal(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		t.Errorf("server should not be contacted; path=%q", r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := New(config.Resolved{URL: srv.URL + "/openmrs", User: "u", Password: "secret"})
+	for _, p := range []string{"../admin", "session/../../../admin", "%2e%2e/admin"} {
+		_, err := c.Get(p, nil)
+		if err == nil {
+			t.Fatalf("Get(%q) expected error", p)
+		}
+		var api *APIError
+		if !asAPI(err, &api) || api.Code != CodeBadRequest {
+			t.Fatalf("Get(%q) err=%v", p, err)
+		}
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("server contacted %d times", hits.Load())
+	}
+}
+
+func TestGetAllRejectsPathTraversal(t *testing.T) {
+	c := New(config.Resolved{URL: "https://demo.example/openmrs"})
+	_, err := c.GetAll("../admin", nil, 10)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
 func TestOffOriginRedirectRefused(t *testing.T) {
 	// First hop 302 to evil host; client must not follow.
 	var hops atomic.Int32
